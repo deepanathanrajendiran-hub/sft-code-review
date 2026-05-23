@@ -10,7 +10,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Iterable
 
 DEFAULT_TRAIN_REPOS = {"transformers", "sklearn", "scikit-learn", "pydantic", "fastapi"}
 
@@ -42,12 +41,14 @@ def get_train_repo_names(train_jsonl: Path | str) -> set[str]:
 
 
 def matches_train_repo(swecare_repo: str, train_names: set[str]) -> bool:
-    """True iff the repo name (case-insensitive) matches any train repo name exactly."""
-    if "/" not in swecare_repo:
-        name = swecare_repo.lower()
-    else:
-        name = swecare_repo.split("/", 1)[1].lower()
-    return name in {n.lower() for n in train_names}
+    """True iff the repo name (case-insensitive on swecare_repo) matches any
+    train repo name exactly.
+
+    Caller MUST pass train_names already lowercased (get_train_repo_names
+    and DEFAULT_TRAIN_REPOS both satisfy this).
+    """
+    name = swecare_repo.split("/", 1)[-1].lower()
+    return name in train_names
 
 
 def map_swecare_row(row: dict) -> dict:
