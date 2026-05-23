@@ -49,8 +49,9 @@ def _extract_review(raw: str) -> str:
         if body and body != "...":
             return body
 
-    stripped = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-    return stripped
+    stripped = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    stripped = re.sub(r"<review>\s*\.\.\.\s*</review>", "", stripped, flags=re.DOTALL)
+    return stripped.strip()
 
 
 def _generate(model_path: str, prompts: list[str]) -> list[str]:
@@ -95,7 +96,7 @@ def main():
             if line:
                 rows.append(json.loads(line))
 
-    if args.limit:
+    if args.limit is not None:
         rows = rows[: args.limit]
 
     print(f"[run_ood_eval] {len(rows)} rows; generating v4 then base", flush=True)
