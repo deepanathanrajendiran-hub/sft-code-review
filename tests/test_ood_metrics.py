@@ -6,7 +6,7 @@ from ood_metrics import (
     iou_lenient, breakdown_by_difficulty, breakdown_by_problem_domain, pairwise_win,
 )
 from ood_metrics import hit_rate, hallucination_rate, STOPWORDS
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 
 class TestExtractLocations:

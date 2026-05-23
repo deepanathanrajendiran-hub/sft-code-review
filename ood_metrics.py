@@ -275,6 +275,8 @@ def _haiku_vote(diff: str, a: str, b: str, api_key: str) -> str:
             "content": PAIRWISE_PROMPT.format(diff=diff[:8000], a=a, b=b),
         }],
     )
+    if not msg.content:
+        return "tie"
     text = msg.content[0].text.strip().upper()
     if text.startswith("A"):
         return "v4"  # caller will pass v4 as A
@@ -338,6 +340,8 @@ def main():
 
     preds = _load_jsonl(args.preds)
     inputs = _load_jsonl(args.labels)
+    if not preds:
+        raise SystemExit(f"No predictions found in {args.preds}")
     # Align by instance_id
     by_id = {row["instance_id"]: row for row in inputs}
     labels_by_instance = [by_id[p["instance_id"]]["reference_comments"] for p in preds]
