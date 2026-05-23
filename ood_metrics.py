@@ -13,7 +13,7 @@ from typing import Any
 
 # Matches `path/to/file.py:42`  or `path/to/file.py`
 _FILE_LINE_RE = re.compile(
-    r"`([A-Za-z0-9_./\-]+\.(?:py|js|ts|java|go|rb|c|cpp|h|hpp|rs))(?::(\d+))?`"
+    r"`([A-Za-z0-9_./\-]+\.(?:py|js|jsx|ts|tsx|java|go|rb|c|cpp|h|hpp|rs))(?::(\d+))?`"
 )
 # Matches `identifier_or_method` — bare backticked code references
 _IDENT_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]{1,40})`")
@@ -29,6 +29,7 @@ def extract_locations(review: str) -> list[dict[str, Any]]:
         return []
     out: list[dict[str, Any]] = []
     seen_pairs: set[tuple[str | None, int | None]] = set()
+    seen_idents: set[str] = set()
 
     for m in _FILE_LINE_RE.finditer(review):
         file = m.group(1)
@@ -48,6 +49,9 @@ def extract_locations(review: str) -> list[dict[str, Any]]:
         # heuristic: skip pure-numeric and very short tokens
         if ident.isdigit() or len(ident) < 3:
             continue
+        if ident in seen_idents:
+            continue
+        seen_idents.add(ident)
         out.append({"identifier": ident})
 
     return out
@@ -107,8 +111,9 @@ def _lenient_match(loc: dict, lbl: dict, line_tol: int) -> bool:
     if loc.get("file") and loc.get("line") and lbl.get("path") and lbl.get("line"):
         if loc["file"] == lbl["path"] and abs(loc["line"] - lbl["line"]) <= line_tol:
             return True
-    # identifier appearance in label text
+    # identifier appearance in label text — word-boundary match to avoid substring false-positives
     if loc.get("identifier") and lbl.get("text"):
-        if loc["identifier"] in lbl["text"]:
+        pattern = r"\b" + re.escape(loc["identifier"]) + r"\b"
+        if re.search(pattern, lbl["text"]):
             return True
     return False

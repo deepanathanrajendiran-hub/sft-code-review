@@ -40,6 +40,21 @@ class TestExtractLocations:
         assert ("auth.py", 10) in files
         assert ("validators.py", 55) in files
 
+    def test_identifier_dedup(self):
+        review = "`validate_token` here, `validate_token` again, and `validate_token` once more"
+        locs = extract_locations(review)
+        idents = [loc.get("identifier") for loc in locs if loc.get("identifier")]
+        assert idents.count("validate_token") == 1, (
+            f"identifier 'validate_token' should be deduplicated; got {idents}"
+        )
+
+    def test_jsx_tsx_extensions(self):
+        review = "Issue at `App.tsx:42` and `Component.jsx:10`."
+        locs = extract_locations(review)
+        files = {(loc["file"], loc["line"]) for loc in locs if loc.get("file")}
+        assert ("App.tsx", 42) in files
+        assert ("Component.jsx", 10) in files
+
 
 class TestIouStrict:
     def test_perfect_match(self):
@@ -88,3 +103,14 @@ class TestIouLenient:
             "text": "validate_token check should be moved up",
         }]
         assert iou_lenient(pred, labels) == 1.0
+
+    def test_short_identifier_does_not_substring_match(self):
+        # Short identifier "err" should NOT match "error" via substring.
+        pred = {"v4_pred": "`err` is the wrong variable"}
+        labels = [{
+            "path": "x.py",
+            "line": 1,
+            "text": "the error handling here is wrong",
+        }]
+        # "err" should NOT word-boundary-match within "error"
+        assert iou_lenient(pred, labels) == 0.0
