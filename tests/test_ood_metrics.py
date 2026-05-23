@@ -5,6 +5,7 @@ from ood_metrics import (
     iou_strict,
     iou_lenient,
 )
+from ood_metrics import hit_rate, hallucination_rate, STOPWORDS
 
 
 class TestExtractLocations:
@@ -114,3 +115,53 @@ class TestIouLenient:
         }]
         # "err" should NOT word-boundary-match within "error"
         assert iou_lenient(pred, labels) == 0.0
+
+class TestHitRate:
+    def test_catches_all_labels(self):
+        pred = {"v4_pred": "`auth.py:11` and `auth.py:22`"}
+        labels = [
+            {"path": "auth.py", "line": 11, "text": "..."},
+            {"path": "auth.py", "line": 22, "text": "..."},
+        ]
+        assert hit_rate(pred, labels) == 1.0
+
+    def test_catches_half(self):
+        pred = {"v4_pred": "`auth.py:11`"}
+        labels = [
+            {"path": "auth.py", "line": 11, "text": "..."},
+            {"path": "auth.py", "line": 22, "text": "..."},
+        ]
+        assert hit_rate(pred, labels) == 0.5
+
+    def test_catches_none(self):
+        pred = {"v4_pred": "`auth.py:99`"}
+        labels = [{"path": "auth.py", "line": 11, "text": "..."}]
+        assert hit_rate(pred, labels) == 0.0
+
+    def test_empty_labels_returns_zero(self):
+        pred = {"v4_pred": "`auth.py:11`"}
+        assert hit_rate(pred, []) == 0.0
+
+
+class TestHallucinationRate:
+    def test_no_hallucination(self, sample_diff):
+        # mentions only identifiers from the diff
+        review = "The check at `user` should also handle empty strings."
+        pred = {"v4_pred": review, "diff": sample_diff}
+        assert hallucination_rate(pred) == 0.0
+
+    def test_hallucinated_identifier(self, sample_diff):
+        review = "The `nonexistent_function` is broken."
+        pred = {"v4_pred": review, "diff": sample_diff}
+        assert hallucination_rate(pred) > 0.0
+
+    def test_stopwords_not_flagged(self, sample_diff):
+        review = "This `Returns` `True` `where` valid."
+        pred = {"v4_pred": review, "diff": sample_diff}
+        # all are in STOPWORDS, none should be flagged
+        assert hallucination_rate(pred) == 0.0
+
+    def test_stopwords_populated(self):
+        # sanity: stopword list should include common Python keywords
+        for token in ["Optional", "True", "False", "None", "Returns"]:
+            assert token in STOPWORDS, f"{token} missing from STOPWORDS"

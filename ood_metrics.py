@@ -117,3 +117,98 @@ def _lenient_match(loc: dict, lbl: dict, line_tol: int) -> bool:
         if re.search(pattern, lbl["text"]):
             return True
     return False
+
+# ---- hit-rate ----
+
+
+def hit_rate(pred: dict, labels: list[dict], line_tol: int = 5) -> float:
+    """Fraction of reference labels caught by v4_pred (lenient line match)."""
+    if not labels:
+        return 0.0
+    pred_locs = extract_locations(pred.get("v4_pred", ""))
+    caught = 0
+    for lbl in labels:
+        for loc in pred_locs:
+            if _lenient_match(loc, lbl, line_tol):
+                caught += 1
+                break
+    return caught / len(labels)
+
+# ---- hallucination rate ----
+
+# Mirror of the stopword list in generate_traces_gemini.py and eval.ipynb Cell 5.
+# Keep these three in sync when adding new stopwords.
+STOPWORDS = frozenset({
+    # Python keywords
+    "True", "False", "None", "if", "else", "elif", "for", "while", "def",
+    "class", "return", "yield", "import", "from", "as", "with", "try",
+    "except", "finally", "raise", "pass", "break", "continue", "lambda",
+    "global", "nonlocal", "assert", "and", "or", "not", "in", "is",
+    # Common English (often backticked as code by reviewers)
+    "where", "returns", "Returns", "expects", "Expects", "because", "however",
+    "therefore", "should", "must", "may", "might", "could", "would",
+    "this", "that", "these", "those", "such", "etc",
+    # Typing module
+    "Optional", "Any", "List", "Dict", "Tuple", "Set", "Union", "Iterator",
+    "Iterable", "Callable", "Awaitable", "Generator", "TypeVar", "Generic",
+    "Type", "ClassVar", "Final", "Literal", "Protocol", "Annotated",
+    # Exceptions
+    "Exception", "ValueError", "TypeError", "KeyError", "IndexError",
+    "AttributeError", "RuntimeError", "NotImplementedError", "FileNotFoundError",
+    "ImportError", "AssertionError", "StopIteration", "ZeroDivisionError",
+    # Common third-party API surfaces (false-positive prone)
+    "JSONResponse", "JWTError", "UploadFile", "Request", "Response",
+    "Path", "Query", "Body", "Form", "Field", "BaseModel",
+    "HTTPException", "Depends", "Header", "Cookie",
+    # ML libs
+    "torch", "numpy", "pandas", "sklearn", "Tensor", "DataFrame", "Series",
+    "Module", "Linear", "Conv2d", "BatchNorm", "Dropout", "ReLU",
+    # Test / framework
+    "pytest", "fixture", "mock", "Mock", "patch", "unittest", "TestCase",
+    "self", "cls", "args", "kwargs",
+    # Generic
+    "data", "value", "result", "obj", "item", "key", "name", "type",
+    "id", "code", "text", "url", "path", "file", "line", "row", "col",
+    # Boolean-y words
+    "true", "false", "null", "nil", "yes", "no", "ok",
+})
+
+
+_DIFF_IDENT_RE = re.compile(r"^[+\-]\s*.*?\b([A-Za-z_][A-Za-z0-9_]{1,40})\b")
+
+
+def _diff_identifiers(diff: str) -> set[str]:
+    """Extract identifiers from + and - lines of a diff."""
+    idents: set[str] = set()
+    for line in diff.splitlines():
+        if not line or line[0] not in "+-":
+            continue
+        if line.startswith(("+++", "---")):
+            continue
+        for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,40}", line):
+            idents.add(tok)
+    return idents
+
+
+def hallucination_rate(pred: dict) -> float:
+    """Fraction of backticked identifiers in v4_pred that don't appear in the diff
+    (and aren't in STOPWORDS).
+
+    Returns the per-instance rate: hallucinated / total_backticked.
+    """
+    review = pred.get("v4_pred", "")
+    diff = pred.get("diff", "")
+    if not review:
+        return 0.0
+
+    diff_idents = _diff_identifiers(diff)
+    backticked = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]{1,40})`", review))
+    if not backticked:
+        return 0.0
+
+    candidates = backticked - STOPWORDS
+    if not candidates:
+        return 0.0
+
+    hallucinated = {c for c in candidates if c not in diff_idents}
+    return len(hallucinated) / len(backticked)
