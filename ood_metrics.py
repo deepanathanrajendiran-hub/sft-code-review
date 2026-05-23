@@ -171,10 +171,13 @@ STOPWORDS = frozenset({
     "id", "code", "text", "url", "path", "file", "line", "row", "col",
     # Boolean-y words
     "true", "false", "null", "nil", "yes", "no", "ok",
+    # Python builtins
+    "str", "int", "float", "bool", "bytes", "list", "dict", "set", "tuple",
+    "len", "range", "print", "open", "super", "property", "staticmethod",
+    "classmethod", "iter", "next", "map", "filter", "sorted", "enumerate",
+    "zip", "isinstance", "issubclass", "hasattr", "getattr", "setattr",
+    "repr", "hash",
 })
-
-
-_DIFF_IDENT_RE = re.compile(r"^[+\-]\s*.*?\b([A-Za-z_][A-Za-z0-9_]{1,40})\b")
 
 
 def _diff_identifiers(diff: str) -> set[str]:

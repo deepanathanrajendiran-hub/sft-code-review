@@ -116,6 +116,7 @@ class TestIouLenient:
         # "err" should NOT word-boundary-match within "error"
         assert iou_lenient(pred, labels) == 0.0
 
+
 class TestHitRate:
     def test_catches_all_labels(self):
         pred = {"v4_pred": "`auth.py:11` and `auth.py:22`"}
@@ -142,6 +143,11 @@ class TestHitRate:
         pred = {"v4_pred": "`auth.py:11`"}
         assert hit_rate(pred, []) == 0.0
 
+    def test_empty_pred_returns_zero(self):
+        pred = {"v4_pred": ""}
+        labels = [{"path": "auth.py", "line": 11, "text": "..."}]
+        assert hit_rate(pred, labels) == 0.0
+
 
 class TestHallucinationRate:
     def test_no_hallucination(self, sample_diff):
@@ -165,3 +171,11 @@ class TestHallucinationRate:
         # sanity: stopword list should include common Python keywords
         for token in ["Optional", "True", "False", "None", "Returns"]:
             assert token in STOPWORDS, f"{token} missing from STOPWORDS"
+
+    def test_no_review_returns_zero(self, sample_diff):
+        pred = {"v4_pred": "", "diff": sample_diff}
+        assert hallucination_rate(pred) == 0.0
+
+    def test_no_backticks_returns_zero(self, sample_diff):
+        pred = {"v4_pred": "Looks fine to me.", "diff": sample_diff}
+        assert hallucination_rate(pred) == 0.0
