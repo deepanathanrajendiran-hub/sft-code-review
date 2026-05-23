@@ -3,9 +3,10 @@ import pytest
 from ood_metrics import (
     extract_locations,
     iou_strict,
-    iou_lenient,
+    iou_lenient, breakdown_by_difficulty, breakdown_by_problem_domain, pairwise_win,
 )
 from ood_metrics import hit_rate, hallucination_rate, STOPWORDS
+from unittest.mock import MagicMock, patch
 
 
 class TestExtractLocations:
@@ -179,3 +180,48 @@ class TestHallucinationRate:
     def test_no_backticks_returns_zero(self, sample_diff):
         pred = {"v4_pred": "Looks fine to me.", "diff": sample_diff}
         assert hallucination_rate(pred) == 0.0
+
+class TestBreakdownByDifficulty:
+    def test_groups_by_field(self):
+        preds = [
+            {"difficulty": "low", "v4_pred": "`auth.py:11`"},
+            {"difficulty": "low", "v4_pred": "`auth.py:20`"},
+            {"difficulty": "hard", "v4_pred": "`auth.py:11`"},
+        ]
+        labels_by_instance = [
+            [{"path": "auth.py", "line": 11, "text": "..."}],
+            [{"path": "auth.py", "line": 11, "text": "..."}],
+            [{"path": "auth.py", "line": 11, "text": "..."}],
+        ]
+        result = breakdown_by_difficulty(preds, labels_by_instance, hit_rate)
+        assert "low" in result
+        assert "hard" in result
+        assert result["low"] == 0.5  # 1/2 caught
+        assert result["hard"] == 1.0  # 1/1 caught
+
+
+class TestBreakdownByProblemDomain:
+    def test_groups_by_field(self):
+        preds = [
+            {"problem_domain": "Bug Fixes", "v4_pred": "`auth.py:11`"},
+            {"problem_domain": "Feature", "v4_pred": "`auth.py:99`"},
+        ]
+        labels_by_instance = [
+            [{"path": "auth.py", "line": 11, "text": "..."}],
+            [{"path": "auth.py", "line": 11, "text": "..."}],
+        ]
+        result = breakdown_by_problem_domain(preds, labels_by_instance, hit_rate)
+        assert result["Bug Fixes"] == 1.0
+        assert result["Feature"] == 0.0
+
+
+class TestPairwiseWin:
+    @patch("ood_metrics._haiku_vote")
+    def test_majority_voting(self, mock_vote):
+        # 2/3 votes prefer v4
+        mock_vote.side_effect = ["v4", "base", "v4"]
+        preds = [{"v4_pred": "good", "base_pred": "bad", "diff": "..."}]
+        result = pairwise_win(preds, api_key="fake")
+        assert result["v4_wins"] == 1
+        assert result["total"] == 1
+        assert result["win_rate"] == 1.0

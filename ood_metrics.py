@@ -215,3 +215,152 @@ def hallucination_rate(pred: dict) -> float:
 
     hallucinated = {c for c in candidates if c not in diff_idents}
     return len(hallucinated) / len(backticked)
+
+# ---- breakdowns ----
+
+
+def breakdown_by_difficulty(
+    preds: list[dict],
+    labels_by_instance: list[list[dict]],
+    metric_fn,
+) -> dict[str, float]:
+    """Run metric_fn per-instance and average per difficulty bucket."""
+    return _groupby_avg(preds, labels_by_instance, metric_fn, key_field="difficulty")
+
+
+def breakdown_by_problem_domain(
+    preds: list[dict],
+    labels_by_instance: list[list[dict]],
+    metric_fn,
+) -> dict[str, float]:
+    """Run metric_fn per-instance and average per problem_domain bucket."""
+    return _groupby_avg(preds, labels_by_instance, metric_fn, key_field="problem_domain")
+
+
+def _groupby_avg(preds, labels_by_instance, metric_fn, key_field) -> dict[str, float]:
+    groups: dict[str, list[float]] = {}
+    for pred, labels in zip(preds, labels_by_instance):
+        bucket = pred.get(key_field, "unknown")
+        groups.setdefault(bucket, []).append(metric_fn(pred, labels))
+    return {k: sum(v) / len(v) for k, v in groups.items()}
+
+
+# ---- pairwise (Haiku 3-vote majority) ----
+
+PAIRWISE_PROMPT = """You are comparing two code reviews. Pick the better one.
+
+DIFF:
+{diff}
+
+REVIEW A:
+{a}
+
+REVIEW B:
+{b}
+
+Which review is better at identifying real issues? Respond with exactly "A" or "B".
+"""
+
+
+def _haiku_vote(diff: str, a: str, b: str, api_key: str) -> str:
+    """Single judge vote. Returns "A" or "B" (or "tie" if unclear)."""
+    from anthropic import Anthropic
+
+    client = Anthropic(api_key=api_key)
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=10,
+        messages=[{
+            "role": "user",
+            "content": PAIRWISE_PROMPT.format(diff=diff[:8000], a=a, b=b),
+        }],
+    )
+    text = msg.content[0].text.strip().upper()
+    if text.startswith("A"):
+        return "v4"  # caller will pass v4 as A
+    if text.startswith("B"):
+        return "base"
+    return "tie"
+
+
+def pairwise_win(preds: list[dict], api_key: str, n_votes: int = 3) -> dict:
+    """3-vote majority pairwise: v4_pred (A) vs base_pred (B). Returns aggregate dict."""
+    v4_wins = 0
+    base_wins = 0
+    ties = 0
+    for pred in preds:
+        votes = [
+            _haiku_vote(pred["diff"], pred["v4_pred"], pred["base_pred"], api_key)
+            for _ in range(n_votes)
+        ]
+        v4_count = sum(1 for v in votes if v == "v4")
+        base_count = sum(1 for v in votes if v == "base")
+        if v4_count > base_count:
+            v4_wins += 1
+        elif base_count > v4_count:
+            base_wins += 1
+        else:
+            ties += 1
+    total = len(preds)
+    return {
+        "total": total,
+        "v4_wins": v4_wins,
+        "base_wins": base_wins,
+        "ties": ties,
+        "win_rate": v4_wins / total if total else 0.0,
+    }
+
+
+# ---- CLI ----
+
+
+def _load_jsonl(path: Path | str) -> list[dict]:
+    rows: list[dict] = []
+    with Path(path).open() as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def main():
+    import argparse
+    import os
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--preds", required=True, help="ood_preds.jsonl")
+    ap.add_argument("--labels", required=True, help="ood_input.jsonl")
+    ap.add_argument("--output", default="ood_eval_results.json")
+    ap.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY", ""))
+    ap.add_argument("--skip-pairwise", action="store_true")
+    args = ap.parse_args()
+
+    preds = _load_jsonl(args.preds)
+    inputs = _load_jsonl(args.labels)
+    # Align by instance_id
+    by_id = {row["instance_id"]: row for row in inputs}
+    labels_by_instance = [by_id[p["instance_id"]]["reference_comments"] for p in preds]
+
+    results: dict[str, Any] = {
+        "n_instances": len(preds),
+        "iou_strict_mean": sum(iou_strict(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
+        "iou_lenient_mean": sum(iou_lenient(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
+        "hit_rate_mean": sum(hit_rate(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
+        "hallucination_rate_mean": sum(hallucination_rate(p) for p in preds) / len(preds),
+        "iou_lenient_by_difficulty": breakdown_by_difficulty(preds, labels_by_instance, iou_lenient),
+        "iou_lenient_by_problem_domain": breakdown_by_problem_domain(preds, labels_by_instance, iou_lenient),
+        "hit_rate_by_difficulty": breakdown_by_difficulty(preds, labels_by_instance, hit_rate),
+    }
+
+    if not args.skip_pairwise:
+        if not args.api_key:
+            raise SystemExit("Need --api-key or ANTHROPIC_API_KEY for pairwise")
+        results["pairwise"] = pairwise_win(preds, args.api_key)
+
+    Path(args.output).write_text(json.dumps(results, indent=2))
+    print(f"[ood_metrics] wrote {args.output}")
+
+
+if __name__ == "__main__":
+    main()
