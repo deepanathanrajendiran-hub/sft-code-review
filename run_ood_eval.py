@@ -17,16 +17,6 @@ from pathlib import Path
 from typing import Any
 
 
-REVIEW_PROMPT = """You are reviewing the following code diff. Output ONLY a `<think>` block followed by a `<review>` block.
-
-DIFF:
-{diff}
-
-Now produce your review."""
-
-
-def _build_prompts(rows: list[dict]) -> list[str]:
-    return [REVIEW_PROMPT.format(diff=row["diff"]) for row in rows]
 
 
 def _extract_review(raw: str) -> str:
@@ -54,8 +44,23 @@ def _extract_review(raw: str) -> str:
     return stripped.strip()
 
 
-def _generate(model_path: str, prompts: list[str]) -> list[str]:
+def _generate(model_path: str, diffs: list[str]) -> list[str]:
     from vllm import LLM, SamplingParams
+    from transformers import AutoTokenizer
+
+    SYSTEM_MSG = "You are a Senior Software Engineer reviewing code changes. Provide clear, actionable feedback."
+    USER_TEMPLATE = "Review this code diff:\n\n```diff\n{diff}\n```"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    formatted_prompts = []
+    for diff in diffs:
+        messages = [
+            {"role": "system", "content": SYSTEM_MSG},
+            {"role": "user", "content": USER_TEMPLATE.format(diff=diff[:3000])},
+        ]
+        formatted_prompts.append(
+            tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        )
 
     llm = LLM(
         model=model_path,
@@ -67,7 +72,7 @@ def _generate(model_path: str, prompts: list[str]) -> list[str]:
         max_tokens=4096,
         repetition_penalty=1.1,
     )
-    outputs = llm.generate(prompts, sp)
+    outputs = llm.generate(formatted_prompts, sp)
     raw_texts = [o.outputs[0].text for o in outputs]
     # Free GPU memory before next model loads
     del llm
@@ -100,14 +105,14 @@ def main():
         rows = rows[: args.limit]
 
     print(f"[run_ood_eval] {len(rows)} rows; generating v4 then base", flush=True)
-    prompts = _build_prompts(rows)
+    diffs = [row["diff"] for row in rows]
 
     print(f"[run_ood_eval] loading v4 ({args.v4_model})", flush=True)
-    v4_raw = _generate(args.v4_model, prompts)
+    v4_raw = _generate(args.v4_model, diffs)
     v4_extracted = [_extract_review(t) for t in v4_raw]
 
     print(f"[run_ood_eval] loading base ({args.base_model})", flush=True)
-    base_raw = _generate(args.base_model, prompts)
+    base_raw = _generate(args.base_model, diffs)
     # base doesn't emit <think>/<review>; pass through stripped
     base_extracted = [_extract_review(t) if "<review>" in t else t.strip() for t in base_raw]
 
