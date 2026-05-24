@@ -52,12 +52,15 @@ def _generate(model_path: str, diffs: list[str], tokenizer) -> list[str]:
 
     formatted_prompts = []
     for diff in diffs:
-        # Training (sft.ipynb Cell 2 format_prompt) used diff[:3000]; matching that here
-        # keeps inference in-distribution. Median Python PR diff is ~5k chars, so ~40%
-        # of SWE-CARE diffs are truncated — this is a known limitation of v4, not a bug.
+        # Training (sft.ipynb Cell 2 format_prompt) used diff[:3000], but inference
+        # bumps this to 12000 to capture the full content of typical SWE-CARE PRs
+        # (median ~5k chars). The model sees positions it didn't train on; this is
+        # intentional — better to risk attention drift than to systematically truncate
+        # 40% of OOD diffs below their first defect. Budget: 12000 chars ≈ ~3430
+        # tokens, leaves ~600-token margin under max_model_len=8192 minus 4096 output.
         messages = [
             {"role": "system", "content": SYSTEM_MSG},
-            {"role": "user", "content": USER_TEMPLATE.format(diff=diff[:3000])},
+            {"role": "user", "content": USER_TEMPLATE.format(diff=diff[:12000])},
         ]
         formatted_prompts.append(
             tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
