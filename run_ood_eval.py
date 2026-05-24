@@ -44,14 +44,12 @@ def _extract_review(raw: str) -> str:
     return stripped.strip()
 
 
-def _generate(model_path: str, diffs: list[str]) -> list[str]:
+def _generate(model_path: str, diffs: list[str], tokenizer) -> list[str]:
     from vllm import LLM, SamplingParams
-    from transformers import AutoTokenizer
 
     SYSTEM_MSG = "You are a Senior Software Engineer reviewing code changes. Provide clear, actionable feedback."
     USER_TEMPLATE = "Review this code diff:\n\n```diff\n{diff}\n```"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
     formatted_prompts = []
     for diff in diffs:
         messages = [
@@ -107,12 +105,16 @@ def main():
     print(f"[run_ood_eval] {len(rows)} rows; generating v4 then base", flush=True)
     diffs = [row["diff"] for row in rows]
 
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    print(f"[run_ood_eval] loaded tokenizer from {args.base_model}", flush=True)
+
     print(f"[run_ood_eval] loading v4 ({args.v4_model})", flush=True)
-    v4_raw = _generate(args.v4_model, diffs)
+    v4_raw = _generate(args.v4_model, diffs, tokenizer)
     v4_extracted = [_extract_review(t) for t in v4_raw]
 
     print(f"[run_ood_eval] loading base ({args.base_model})", flush=True)
-    base_raw = _generate(args.base_model, diffs)
+    base_raw = _generate(args.base_model, diffs, tokenizer)
     # base doesn't emit <think>/<review>; pass through stripped
     base_extracted = [_extract_review(t) if "<review>" in t else t.strip() for t in base_raw]
 
