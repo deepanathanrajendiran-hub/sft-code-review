@@ -8,6 +8,10 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+import random
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
 
 # ---- location extraction ----
 
@@ -294,75 +298,119 @@ def _groupby_avg(preds, labels_by_instance, metric_fn, key_field) -> dict[str, f
     return {k: sum(v) / len(v) for k, v in groups.items()}
 
 
-# ---- pairwise (Haiku 3-vote majority) ----
+# ---- pairwise (Haiku 3-vote majority — production judge, matches eval.ipynb Cell 6) ----
 
-PAIRWISE_PROMPT = """You are comparing two code reviews. Pick the better one.
+HAIKU_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
-DIFF:
-{diff}
-
-REVIEW A:
-{a}
-
-REVIEW B:
-{b}
-
-Which review is better at identifying real issues? Respond with exactly "A" or "B".
-"""
+_judge_client = None
 
 
-def _haiku_vote(diff: str, a: str, b: str, api_key: str) -> str:
-    """Single judge vote. Returns "A" or "B" (or "tie" if unclear)."""
-    from anthropic import Anthropic
-
-    client = Anthropic(api_key=api_key)
-    msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=10,
-        messages=[{
-            "role": "user",
-            "content": PAIRWISE_PROMPT.format(diff=diff[:8000], a=a, b=b),
-        }],
-    )
-    if not msg.content:
-        return "tie"
-    text = msg.content[0].text.strip().upper()
-    if text.startswith("A"):
-        return "v4"  # caller will pass v4 as A
-    if text.startswith("B"):
-        return "base"
-    return "tie"
+def _get_judge_client():
+    global _judge_client
+    if _judge_client is None:
+        import anthropic
+        _judge_client = anthropic.AnthropicBedrock(aws_region="us-west-2")
+    return _judge_client
 
 
-def pairwise_win(preds: list[dict], api_key: str, n_votes: int = 3) -> dict:
-    """3-vote majority pairwise: v4_pred (A) vs base_pred (B). Returns aggregate dict."""
-    v4_wins = 0
-    base_wins = 0
-    ties = 0
-    for pred in preds:
-        votes = [
-            _haiku_vote(pred["diff"], pred["v4_pred"], pred["base_pred"], api_key)
-            for _ in range(n_votes)
-        ]
-        v4_count = sum(1 for v in votes if v == "v4")
-        base_count = sum(1 for v in votes if v == "base")
-        if v4_count > base_count:
-            v4_wins += 1
-        elif base_count > v4_count:
-            base_wins += 1
-        else:
-            ties += 1
-    total = len(preds)
-    return {
-        "total": total,
-        "v4_wins": v4_wins,
-        "base_wins": base_wins,
-        "ties": ties,
-        "win_rate": v4_wins / total if total else 0.0,
-    }
 
 
 # ---- CLI ----
+
+
+def haiku_pairwise_judge(review_a: str, review_b: str, diff: str, reference: str) -> str:
+    """One call. Randomized A/B order. Returns 'A', 'B', or 'TIE'."""
+    swap = random.random() > 0.5
+    ra, rb = (review_b, review_a) if swap else (review_a, review_b)
+
+    resp = _get_judge_client().messages.create(
+        model=HAIKU_MODEL,
+        max_tokens=4,
+        messages=[{"role": "user", "content": (
+            "Compare two code reviews for the same diff. Which is better?\n\n"
+            f"DIFF:\n{diff[:2000]}\n\n"
+            f"REFERENCE (expert review):\n{reference[:500]}\n\n"
+            f"REVIEW A:\n{ra[:500]}\n\n"
+            f"REVIEW B:\n{rb[:500]}\n\n"
+            "Criteria: accuracy, actionability, specificity, relevance.\n"
+            "Reply ONLY: A, B, or TIE"
+        )}],
+    )
+    result = resp.content[0].text.strip().upper()
+    if "TIE" in result:
+        result = "TIE"
+    elif "A" in result and "B" not in result:
+        result = "A"
+    elif "B" in result and "A" not in result:
+        result = "B"
+    else:
+        result = "TIE"
+    if swap:
+        if result == "A": result = "B"
+        elif result == "B": result = "A"
+    return result
+
+
+def haiku_pairwise_judge_3vote(review_a: str, review_b: str, diff: str, reference: str) -> str:
+    """3-vote majority. Returns 'A', 'B', or 'TIE'."""
+    votes = [haiku_pairwise_judge(review_a, review_b, diff, reference) for _ in range(3)]
+    c = Counter(votes)
+    top_label, top_count = c.most_common(1)[0]
+    return top_label if top_count >= 2 else "TIE"
+
+
+def bootstrap_winrate_ci(verdicts: list[str], which: str = "A", n_iter: int = 2000, ci: int = 95) -> tuple[float, float, float]:
+    """Returns (mean_winrate, ci_lo, ci_hi)."""
+    rng = np.random.default_rng(42)
+    indicator = np.array([1 if v == which else 0 for v in verdicts])
+    N = len(indicator)
+    if N == 0:
+        return 0.0, 0.0, 0.0
+    samples = np.array([indicator[rng.integers(0, N, N)].mean() for _ in range(n_iter)])
+    alpha = (100 - ci) / 2
+    lo = float(np.percentile(samples, alpha))
+    hi = float(np.percentile(samples, 100 - alpha))
+    return float(indicator.mean()), lo, hi
+
+
+def pairwise_win(
+    preds: list[dict],
+    api_key: str = "",  # ignored; AnthropicBedrock uses AWS credentials
+    n_votes: int = 3,  # ignored; haiku_pairwise_judge_3vote hardcodes 3
+    max_workers: int = 16,
+) -> dict:
+    """3-vote majority pairwise: v4_pred (A) vs base_pred (B) with order swap and
+    reference review. Returns aggregate dict including bootstrap 95% CI.
+    """
+    def _vote_one(pred):
+        return haiku_pairwise_judge_3vote(
+            review_a=pred["v4_pred"],
+            review_b=pred["base_pred"],
+            diff=pred.get("diff", ""),
+            reference=pred.get("reference_text", ""),
+        )
+
+    verdicts: list[str] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(_vote_one, p) for p in preds]
+        for fut in as_completed(futures):
+            verdicts.append(fut.result())
+
+    mean_a, lo_a, hi_a = bootstrap_winrate_ci(verdicts, which="A")
+    mean_b, lo_b, hi_b = bootstrap_winrate_ci(verdicts, which="B")
+    mean_t, lo_t, hi_t = bootstrap_winrate_ci(verdicts, which="TIE")
+
+    total = len(preds)
+    return {
+        "total": total,
+        "v4_wins": int(mean_a * total),
+        "base_wins": int(mean_b * total),
+        "ties": int(mean_t * total),
+        "win_rate": mean_a,
+        "win_rate_ci_lo": lo_a,
+        "win_rate_ci_hi": hi_a,
+        "tie_rate": mean_t,
+    }
 
 
 def _load_jsonl(path: Path | str) -> list[dict]:
@@ -383,7 +431,11 @@ def main():
     ap.add_argument("--preds", required=True, help="ood_preds.jsonl")
     ap.add_argument("--labels", required=True, help="ood_input.jsonl")
     ap.add_argument("--output", default="ood_eval_results.json")
-    ap.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY", ""))
+    ap.add_argument(
+        "--api-key",
+        default=os.environ.get("ANTHROPIC_API_KEY", ""),
+        help="DEPRECATED: ignored; pairwise uses AnthropicBedrock with AWS credentials",
+    )
     ap.add_argument("--skip-pairwise", action="store_true")
     args = ap.parse_args()
 
@@ -408,8 +460,6 @@ def main():
     }
 
     if not args.skip_pairwise:
-        if not args.api_key:
-            raise SystemExit("Need --api-key or ANTHROPIC_API_KEY for pairwise")
         results["pairwise"] = pairwise_win(preds, args.api_key)
 
     Path(args.output).write_text(json.dumps(results, indent=2))

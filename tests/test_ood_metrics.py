@@ -4,6 +4,8 @@ from ood_metrics import (
     extract_locations,
     iou_strict,
     iou_lenient, breakdown_by_difficulty, breakdown_by_problem_domain, pairwise_win,
+    haiku_pairwise_judge_3vote,
+    bootstrap_winrate_ci,
 )
 from ood_metrics import hit_rate, hit_rate_strict, hallucination_rate, STOPWORDS
 from unittest.mock import patch
@@ -255,12 +257,34 @@ class TestBreakdownByProblemDomain:
 
 
 class TestPairwiseWin:
-    @patch("ood_metrics._haiku_vote")
-    def test_majority_voting(self, mock_vote):
-        # 2/3 votes prefer v4
-        mock_vote.side_effect = ["v4", "base", "v4"]
-        preds = [{"v4_pred": "good", "base_pred": "bad", "diff": "..."}]
-        result = pairwise_win(preds, api_key="fake")
+    @patch("ood_metrics.haiku_pairwise_judge_3vote")
+    def test_majority_outcome(self, mock_vote):
+        mock_vote.return_value = "A"  # v4 wins 1/1
+        preds = [{
+            "v4_pred": "good", "base_pred": "bad",
+            "diff": "...", "reference_text": "expert"
+        }]
+        result = pairwise_win(preds)
         assert result["v4_wins"] == 1
         assert result["total"] == 1
         assert result["win_rate"] == 1.0
+        assert "win_rate_ci_lo" in result
+        assert "win_rate_ci_hi" in result
+
+
+class TestBootstrapWinrateCi:
+    def test_zero_verdicts(self):
+        mean, lo, hi = bootstrap_winrate_ci([], which="A")
+        assert mean == 0.0 and lo == 0.0 and hi == 0.0
+
+    def test_all_a_winrate_is_one(self):
+        mean, lo, hi = bootstrap_winrate_ci(["A"] * 50, which="A")
+        assert mean == 1.0
+        assert hi == 1.0
+        assert lo == 1.0  # zero variance
+
+    def test_half_and_half(self):
+        verdicts = ["A"] * 50 + ["B"] * 50
+        mean, lo, hi = bootstrap_winrate_ci(verdicts, which="A", n_iter=500)
+        assert abs(mean - 0.5) < 0.01
+        assert lo < 0.5 < hi
