@@ -5,7 +5,7 @@ from ood_metrics import (
     iou_strict,
     iou_lenient, breakdown_by_difficulty, breakdown_by_problem_domain, pairwise_win,
 )
-from ood_metrics import hit_rate, hallucination_rate, STOPWORDS
+from ood_metrics import hit_rate, hit_rate_strict, hallucination_rate, STOPWORDS
 from unittest.mock import patch
 
 
@@ -85,6 +85,11 @@ class TestIouStrict:
         labels = []
         assert iou_strict(pred, labels) == 0.0
 
+    def test_both_empty_returns_one(self):
+        pred = {"v4_pred": ""}
+        labels = []
+        assert iou_strict(pred, labels) == 1.0
+
 
 class TestIouLenient:
     def test_within_5_lines_counts(self):
@@ -117,6 +122,11 @@ class TestIouLenient:
         # "err" should NOT word-boundary-match within "error"
         assert iou_lenient(pred, labels) == 0.0
 
+    def test_both_empty_returns_one(self):
+        pred = {"v4_pred": ""}
+        labels = []
+        assert iou_lenient(pred, labels) == 1.0
+
 
 class TestHitRate:
     def test_catches_all_labels(self):
@@ -140,9 +150,9 @@ class TestHitRate:
         labels = [{"path": "auth.py", "line": 11, "text": "..."}]
         assert hit_rate(pred, labels) == 0.0
 
-    def test_empty_labels_returns_zero(self):
+    def test_empty_labels_returns_one(self):
         pred = {"v4_pred": "`auth.py:11`"}
-        assert hit_rate(pred, []) == 0.0
+        assert hit_rate(pred, []) == 1.0  # vacuous — nothing was supposed to be flagged
 
     def test_empty_pred_returns_zero(self):
         pred = {"v4_pred": ""}
@@ -163,14 +173,14 @@ class TestHallucinationRate:
         assert hallucination_rate(pred) > 0.0
 
     def test_stopwords_not_flagged(self, sample_diff):
-        review = "This `Returns` `True` `where` valid."
+        review = "This `returns` `True` `where` valid."
         pred = {"v4_pred": review, "diff": sample_diff}
         # all are in STOPWORDS, none should be flagged
         assert hallucination_rate(pred) == 0.0
 
     def test_stopwords_populated(self):
-        # sanity: stopword list should include common Python keywords
-        for token in ["Optional", "True", "False", "None", "Returns"]:
+        # sanity: stopword list should include tokens from the synced eval.ipynb _STOP
+        for token in ["Optional", "True", "False", "None", "async", "await", "returns"]:
             assert token in STOPWORDS, f"{token} missing from STOPWORDS"
 
     def test_no_review_returns_zero(self, sample_diff):
@@ -180,6 +190,35 @@ class TestHallucinationRate:
     def test_no_backticks_returns_zero(self, sample_diff):
         pred = {"v4_pred": "Looks fine to me.", "diff": sample_diff}
         assert hallucination_rate(pred) == 0.0
+
+    def test_denominator_excludes_stopwords(self, sample_diff):
+        # review has: 2 stopwords (True, None), 1 real diff identifier (user),
+        # 1 hallucinated identifier (nonexistent_function)
+        # candidates = {nonexistent_function, user} (stopwords excluded)
+        # hallucinated = {nonexistent_function}
+        # Expected: 1/2 = 0.5 (not 1/4 = 0.25 if denominator used all backticked)
+        review = "Issues with `True`, `None`, `user`, and `nonexistent_function`."
+        pred = {"v4_pred": review, "diff": sample_diff}
+        result = hallucination_rate(pred)
+        assert abs(result - 0.5) < 0.01, f"Expected 0.5, got {result}"
+
+
+class TestHitRateStrict:
+    def test_strict_exact_match(self):
+        pred = {"v4_pred": "`auth.py:11`"}
+        labels = [{"path": "auth.py", "line": 11, "text": "..."}]
+        assert hit_rate_strict(pred, labels) == 1.0
+
+    def test_strict_off_by_one_fails(self):
+        # ±5 lenient would match; strict does not
+        pred = {"v4_pred": "`auth.py:12`"}
+        labels = [{"path": "auth.py", "line": 11, "text": "..."}]
+        assert hit_rate_strict(pred, labels) == 0.0
+
+    def test_strict_empty_labels(self):
+        pred = {"v4_pred": "`auth.py:11`"}
+        assert hit_rate_strict(pred, []) == 1.0
+
 
 class TestBreakdownByDifficulty:
     def test_groups_by_field(self):

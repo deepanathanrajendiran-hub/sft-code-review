@@ -74,7 +74,7 @@ def iou_strict(pred: dict, labels: list[dict]) -> float:
     pred_pairs = _file_line_pairs(pred_locs)
     label_pairs = _label_pairs(labels)
     if not pred_pairs and not label_pairs:
-        return 0.0
+        return 1.0  # vacuous agreement — model correctly said nothing on a clean diff
     inter = len(pred_pairs & label_pairs)
     union = len(pred_pairs | label_pairs)
     return inter / union if union else 0.0
@@ -87,7 +87,7 @@ def iou_lenient(pred: dict, labels: list[dict], line_tol: int = 5) -> float:
     """
     pred_locs = extract_locations(pred.get("v4_pred", ""))
     if not pred_locs and not labels:
-        return 0.0
+        return 1.0  # vacuous agreement — model correctly said nothing on a clean diff
 
     matched_pred: set[int] = set()
     matched_label: set[int] = set()
@@ -124,7 +124,7 @@ def _lenient_match(loc: dict, lbl: dict, line_tol: int) -> bool:
 def hit_rate(pred: dict, labels: list[dict], line_tol: int = 5) -> float:
     """Fraction of reference labels caught by v4_pred (lenient line match)."""
     if not labels:
-        return 0.0
+        return 1.0  # vacuous — model correctly didn't flag a clean diff
     pred_locs = extract_locations(pred.get("v4_pred", ""))
     caught = 0
     for lbl in labels:
@@ -134,49 +134,98 @@ def hit_rate(pred: dict, labels: list[dict], line_tol: int = 5) -> float:
                 break
     return caught / len(labels)
 
+def hit_rate_strict(pred: dict, labels: list[dict]) -> float:
+    """Fraction of reference labels caught by v4_pred (strict exact file+line match)."""
+    if not labels:
+        return 1.0  # vacuous — model correctly didn't flag a clean diff
+    pred_locs = extract_locations(pred.get("v4_pred", ""))
+    pred_pairs = _file_line_pairs(pred_locs)
+    caught = sum(
+        1 for lbl in labels
+        if lbl.get("path") and lbl.get("line") and (lbl["path"], lbl["line"]) in pred_pairs
+    )
+    return caught / len(labels)
+
 # ---- hallucination rate ----
 
-# Mirror of the stopword list in generate_traces_gemini.py and eval.ipynb Cell 5.
-# Keep these three in sync when adding new stopwords.
+# Mirror of the stopword list in eval.ipynb Cell 5 (_STOP).
+# Keep these in sync when adding new stopwords.
 STOPWORDS = frozenset({
-    # Python keywords
-    "True", "False", "None", "if", "else", "elif", "for", "while", "def",
-    "class", "return", "yield", "import", "from", "as", "with", "try",
-    "except", "finally", "raise", "pass", "break", "continue", "lambda",
-    "global", "nonlocal", "assert", "and", "or", "not", "in", "is",
-    # Common English (often backticked as code by reviewers)
-    "where", "returns", "Returns", "expects", "Expects", "because", "however",
-    "therefore", "should", "must", "may", "might", "could", "would",
-    "this", "that", "these", "those", "such", "etc",
-    # Typing module
-    "Optional", "Any", "List", "Dict", "Tuple", "Set", "Union", "Iterator",
-    "Iterable", "Callable", "Awaitable", "Generator", "TypeVar", "Generic",
-    "Type", "ClassVar", "Final", "Literal", "Protocol", "Annotated",
-    # Exceptions
-    "Exception", "ValueError", "TypeError", "KeyError", "IndexError",
-    "AttributeError", "RuntimeError", "NotImplementedError", "FileNotFoundError",
-    "ImportError", "AssertionError", "StopIteration", "ZeroDivisionError",
-    # Common third-party API surfaces (false-positive prone)
-    "JSONResponse", "JWTError", "UploadFile", "Request", "Response",
-    "Path", "Query", "Body", "Form", "Field", "BaseModel",
-    "HTTPException", "Depends", "Header", "Cookie",
-    # ML libs
-    "torch", "numpy", "pandas", "sklearn", "Tensor", "DataFrame", "Series",
-    "Module", "Linear", "Conv2d", "BatchNorm", "Dropout", "ReLU",
-    # Test / framework
-    "pytest", "fixture", "mock", "Mock", "patch", "unittest", "TestCase",
-    "self", "cls", "args", "kwargs",
-    # Generic
-    "data", "value", "result", "obj", "item", "key", "name", "type",
-    "id", "code", "text", "url", "path", "file", "line", "row", "col",
-    # Boolean-y words
-    "true", "false", "null", "nil", "yes", "no", "ok",
-    # Python builtins
-    "str", "int", "float", "bool", "bytes", "list", "dict", "set", "tuple",
-    "len", "range", "print", "open", "super", "property", "staticmethod",
-    "classmethod", "iter", "next", "map", "filter", "sorted", "enumerate",
-    "zip", "isinstance", "issubclass", "hasattr", "getattr", "setattr",
-    "repr", "hash",
+    # Python keywords (≥3 chars; shorter ones already filtered by _IDENT_RE min length)
+    'self', 'return', 'import', 'class', 'with', 'from', 'def',
+    'the', 'and', 'for', 'not', 'this', 'that',
+    'try', 'except', 'finally', 'raise', 'async', 'await', 'assert',
+    'lambda', 'yield', 'pass', 'elif', 'else', 'while', 'break',
+    'continue', 'global', 'nonlocal',
+    # Built-in primitives
+    'True', 'False', 'None',
+    'bool', 'bytes', 'bytearray', 'complex', 'dict', 'float', 'frozenset',
+    'int', 'list', 'object', 'set', 'str', 'tuple', 'type',
+    # Standard exception types
+    'BaseException', 'Exception',
+    'ArithmeticError', 'AssertionError', 'AttributeError', 'BufferError', 'EOFError',
+    'FloatingPointError', 'GeneratorExit', 'ImportError', 'ModuleNotFoundError',
+    'IndexError', 'KeyError', 'KeyboardInterrupt', 'LookupError', 'MemoryError',
+    'NameError', 'NotImplementedError', 'OSError', 'OverflowError',
+    'RecursionError', 'ReferenceError', 'RuntimeError',
+    'StopAsyncIteration', 'StopIteration',
+    'SyntaxError', 'IndentationError', 'TabError',
+    'SystemError', 'SystemExit',
+    'TypeError', 'UnboundLocalError', 'ValueError', 'ZeroDivisionError',
+    'UnicodeError', 'UnicodeDecodeError', 'UnicodeEncodeError', 'UnicodeTranslateError',
+    'ConnectionError', 'ConnectionAbortedError', 'ConnectionRefusedError', 'ConnectionResetError',
+    'BlockingIOError', 'BrokenPipeError', 'ChildProcessError',
+    'FileExistsError', 'FileNotFoundError', 'InterruptedError',
+    'IsADirectoryError', 'NotADirectoryError', 'PermissionError',
+    'ProcessLookupError', 'TimeoutError',
+    # typing-module vocabulary
+    'Optional', 'Union', 'Callable', 'Any', 'Annotated', 'Literal',
+    'Iterable', 'Iterator', 'AsyncIterable', 'AsyncIterator',
+    'Generator', 'AsyncGenerator', 'Coroutine', 'Awaitable',
+    'Sequence', 'MutableSequence', 'Mapping', 'MutableMapping',
+    'List', 'Dict', 'Tuple', 'Set', 'FrozenSet',
+    'Type', 'ClassVar', 'TypeVar', 'Generic', 'Final',
+    'Protocol', 'NamedTuple', 'TypedDict', 'NewType', 'cast', 'overload',
+    # Common builtins reviewers reference as vocabulary
+    'print', 'len', 'range', 'super', 'property',
+    'isinstance', 'issubclass', 'hasattr', 'getattr', 'setattr', 'delattr',
+    'staticmethod', 'classmethod', 'callable',
+    # ML library names
+    'huggingface_hub', 'transformers', 'accelerate', 'datasets',
+    'torch', 'torchvision', 'pytorch', 'tensorflow', 'jax', 'flax',
+    'numpy', 'pandas', 'sklearn', 'scipy', 'pytest', 'sentencepiece',
+    # Universal ML attribute vocabulary
+    'batch_size', 'num_channels', 'attention_mask', 'pixel_values',
+    'return_tensors', 'input_ids', 'hidden_states', 'logits', 'embeddings',
+    # Common framework method/attribute names
+    'outputs', 'headers', 'forward', 'generate', 'encode', 'decode',
+    # Dunders
+    '__call__', '__init__', '__repr__', '__str__', '__len__', '__iter__',
+    '__base__', '__bases__', '__class__', '__dict__', '__name__', '__module__',
+    '__mro__', '__qualname__', '__subclasses__',
+    # FastAPI / Pydantic / stdlib / pytest vocabulary
+    'APIRoute', 'Response', 'Request',
+    'validation_alias', 'serialization_alias',
+    'PurePath', 'Path', 'PathLike',
+    'HTTPConnection', 'HTTPSConnection',
+    'pytest_runtest_setup', 'pytest_runtest_call', 'pytest_collection_modifyitems',
+    # English words that look like identifiers in backticks
+    'where', 'when', 'whenever', 'because', 'then', 'after', 'before',
+    'using', 'via', 'uses', 'without', 'inside', 'into', 'contains',
+    'becomes', 'has', 'have', 'being', 'causes', 'likely', 'something',
+    'expects', 'accepts', 'returns',
+    'here', 'there', 'must', 'should', 'would', 'could', 'note', 'also',
+    'still', 'under', 'over', 'above', 'below', 'between', 'during',
+    'against', 'unlike', 'like',
+    # Standard-library + commonly-discussed third-party API names
+    'weakref', 'urllib', 'urllib3', 'requests', 'httpx',
+    'starlette', 'redoc', 'swagger', 'openapi', 'asgi', 'wsgi',
+    'redoc_url', 'swagger_url', 'openapi_url', 'docs_url',
+    'encode_multipart_formdata', 'multipart_formdata',
+    'werkzeug', 'flask', 'django',
+    'pydantic_core', 'email_validator',
+    'JWTError', 'UploadFile', 'get_type_hints',
+    'checks', 'sets', 'default', 'redirect_slashes',
 })
 
 
@@ -197,7 +246,7 @@ def hallucination_rate(pred: dict) -> float:
     """Fraction of backticked identifiers in v4_pred that don't appear in the diff
     (and aren't in STOPWORDS).
 
-    Returns the per-instance rate: hallucinated / total_backticked.
+    Returns the per-instance rate: hallucinated / candidates (non-stopword backticks).
     """
     review = pred.get("v4_pred", "")
     diff = pred.get("diff", "")
@@ -214,7 +263,7 @@ def hallucination_rate(pred: dict) -> float:
         return 0.0
 
     hallucinated = {c for c in candidates if c not in diff_idents}
-    return len(hallucinated) / len(backticked)
+    return len(hallucinated) / len(candidates)
 
 # ---- breakdowns ----
 
@@ -351,6 +400,7 @@ def main():
         "iou_strict_mean": sum(iou_strict(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
         "iou_lenient_mean": sum(iou_lenient(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
         "hit_rate_mean": sum(hit_rate(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
+        "hit_rate_strict_mean": sum(hit_rate_strict(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
         "hallucination_rate_mean": sum(hallucination_rate(p) for p in preds) / len(preds),
         "iou_lenient_by_difficulty": breakdown_by_difficulty(preds, labels_by_instance, iou_lenient),
         "iou_lenient_by_problem_domain": breakdown_by_problem_domain(preds, labels_by_instance, iou_lenient),

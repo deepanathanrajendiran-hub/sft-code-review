@@ -57,7 +57,19 @@ def map_swecare_row(row: dict) -> dict:
         "instance_id": row["instance_id"],
         "repo": row["repo"],
         "diff": row["commit_to_review"]["patch_to_review"],
-        "reference_comments": list(row.get("reference_review_comments", [])),
+        "reference_comments": [
+            {
+                "path": c.get("path"),
+                "line": c.get("line") if c.get("line") is not None else c.get("original_line"),
+                "text": c.get("text", ""),
+            }
+            for c in row.get("reference_review_comments", [])
+        ],
+        "reference_text": "\n\n".join(
+            c.get("text", "")
+            for c in row.get("reference_review_comments", [])
+            if c.get("text")
+        ),
         "difficulty": row.get("metadata", {}).get("difficulty", "unknown"),
         "problem_domain": row.get("metadata", {}).get("problem_domain", "unknown"),
     }

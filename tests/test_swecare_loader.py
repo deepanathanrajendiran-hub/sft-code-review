@@ -51,6 +51,32 @@ class TestMapSwecareRow:
         assert out["reference_comments"][0]["path"] == "auth.py"
         assert out["reference_comments"][0]["line"] == 11
 
+    def test_remaps_line_from_original_line(self):
+        row = {
+            "instance_id": "x", "repo": "x/y", "commit_to_review": {"patch_to_review": ""},
+            "reference_review_comments": [
+                {"path": "a.py", "line": None, "original_line": 42, "text": "t1"},
+                {"path": "b.py", "line": 7, "original_line": 99, "text": "t2"},
+            ],
+            "metadata": {"difficulty": "low", "problem_domain": "Bug"},
+        }
+        out = map_swecare_row(row)
+        assert out["reference_comments"][0]["line"] == 42  # remapped from original_line
+        assert out["reference_comments"][1]["line"] == 7   # kept (not None)
+
+    def test_emits_reference_text(self):
+        row = {
+            "instance_id": "x", "repo": "x/y", "commit_to_review": {"patch_to_review": ""},
+            "reference_review_comments": [
+                {"path": "a.py", "line": 1, "text": "alpha"},
+                {"path": "a.py", "line": 2, "text": "beta"},
+            ],
+            "metadata": {},
+        }
+        out = map_swecare_row(row)
+        assert "alpha" in out["reference_text"]
+        assert "beta" in out["reference_text"]
+
 
 class TestGetTrainRepoNames:
     def test_extracts_unique_names(self, tmp_path):
