@@ -1,0 +1,67 @@
+{
+  "n_instances": 632,
+  "iou_strict_mean": 0.00949367088607595,
+  "iou_lenient_mean": 0.0776867356599546,
+  "hit_rate_mean": 0.16693178326182792,
+  "hit_rate_strict_mean": 0.0,
+  "hallucination_rate_mean": 0.03635798536906132,
+  "iou_lenient_by_difficulty": {
+    "medium": 0.07601729022934157,
+    "high": 0.03962467745718977,
+    "low": 0.09526382708200891
+  },
+  "iou_lenient_by_problem_domain": {
+    "Bug Fixes": 0.0883268629168545,
+    "New Feature Additions": 0.06782609158769368,
+    "Code Refactoring / Architectural Improvement": 0.06477920227920228,
+    "Test Suite / CI Enhancements": 0.04214285714285714,
+    "Documentation Updates": 0.075,
+    "Performance Optimizations": 0.07019704433497537,
+    "Security Patches / Vulnerability Fixes": 0.0303030303030303,
+    "Code Style, Linting, Formatting Fixes": 0.10856009070294784,
+    "Dependency Updates & Env Compatibility": 0.07666666666666666
+  },
+  "hit_rate_by_difficulty": {
+    "medium": 0.1719556450030993,
+    "high": 0.14619047619047618,
+    "low": 0.153168044077135
+  },
+  "base": {
+    "iou_strict_mean": 0.00949367088607595,
+    "iou_lenient_mean": 0.08306380164152519,
+    "hit_rate_mean": 0.35021987170395585,
+    "hit_rate_strict_mean": 0.0,
+    "hallucination_rate_mean": 0.061890579532984595,
+    "iou_lenient_by_difficulty": {
+      "medium": 0.08180014619851024,
+      "high": 0.04764711478997193,
+      "low": 0.09827937214300851
+    },
+    "iou_lenient_by_problem_domain": {
+      "Bug Fixes": 0.08720845437308852,
+      "New Feature Additions": 0.07982089067084162,
+      "Code Refactoring / Architectural Improvement": 0.07174168424168424,
+      "Test Suite / CI Enhancements": 0.03285409035409036,
+      "Documentation Updates": 0.09916666666666667,
+      "Performance Optimizations": 0.1286821416131761,
+      "Security Patches / Vulnerability Fixes": 0.06904761904761904,
+      "Code Style, Linting, Formatting Fixes": 0.08357535321821036,
+      "Dependency Updates & Env Compatibility": 0.06389898357003619
+    },
+    "hit_rate_by_difficulty": {
+      "medium": 0.3522177008058125,
+      "high": 0.23714285714285716,
+      "low": 0.375068870523416
+    }
+  },
+  "pairwise": {
+    "total": 632,
+    "v4_wins": 499,
+    "base_wins": 121,
+    "ties": 12,
+    "win_rate": 0.7895569620253164,
+    "win_rate_ci_lo": 0.7579113924050633,
+    "win_rate_ci_hi": 0.8212025316455697,
+    "tie_rate": 0.0189873417721519
+  }
+}

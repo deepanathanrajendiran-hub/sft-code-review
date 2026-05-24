@@ -204,10 +204,32 @@ STOPWORDS = frozenset({
     'return_tensors', 'input_ids', 'hidden_states', 'logits', 'embeddings',
     # Common framework method/attribute names
     'outputs', 'headers', 'forward', 'generate', 'encode', 'decode',
-    # Dunders
-    '__call__', '__init__', '__repr__', '__str__', '__len__', '__iter__',
+    # Dunders (comprehensive — these are Python protocol methods, never hallucinations)
+    '__call__', '__init__', '__new__', '__del__', '__post_init__',
+    '__repr__', '__str__', '__bytes__', '__format__', '__hash__', '__bool__',
+    '__len__', '__length_hint__', '__sizeof__',
+    '__iter__', '__next__', '__reversed__',
+    '__getitem__', '__setitem__', '__delitem__', '__contains__', '__missing__',
+    '__getattr__', '__getattribute__', '__setattr__', '__delattr__', '__dir__',
+    '__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__',
+    '__add__', '__radd__', '__iadd__', '__sub__', '__rsub__', '__isub__',
+    '__mul__', '__rmul__', '__imul__', '__truediv__', '__rtruediv__', '__itruediv__',
+    '__floordiv__', '__rfloordiv__', '__mod__', '__rmod__',
+    '__pow__', '__rpow__', '__matmul__', '__rmatmul__',
+    '__and__', '__or__', '__xor__', '__lshift__', '__rshift__',
+    '__neg__', '__pos__', '__abs__', '__invert__', '__round__',
+    '__int__', '__float__', '__complex__', '__index__',
+    '__enter__', '__exit__', '__aenter__', '__aexit__',
+    '__aiter__', '__anext__', '__await__',
+    '__copy__', '__deepcopy__',
+    '__getstate__', '__setstate__', '__reduce__', '__reduce_ex__', '__getnewargs__',
+    '__instancecheck__', '__subclasscheck__', '__init_subclass__', '__class_getitem__',
+    '__prepare__', '__set_name__', '__match_args__',
     '__base__', '__bases__', '__class__', '__dict__', '__name__', '__module__',
-    '__mro__', '__qualname__', '__subclasses__',
+    '__mro__', '__qualname__', '__subclasses__', '__doc__', '__weakref__',
+    '__slots__', '__annotations__', '__defaults__', '__kwdefaults__',
+    '__file__', '__path__', '__package__', '__loader__', '__spec__',
+    '__all__', '__author__', '__version__',
     # FastAPI / Pydantic / stdlib / pytest vocabulary
     'APIRoute', 'Response', 'Request',
     'validation_alias', 'serialization_alias',
@@ -223,27 +245,90 @@ STOPWORDS = frozenset({
     'still', 'under', 'over', 'above', 'below', 'between', 'during',
     'against', 'unlike', 'like',
     # Standard-library + commonly-discussed third-party API names
-    'weakref', 'urllib', 'urllib3', 'requests', 'httpx',
+    'weakref', 'urllib', 'urllib3', 'requests', 'httpx', 'aiohttp',
     'starlette', 'redoc', 'swagger', 'openapi', 'asgi', 'wsgi',
     'redoc_url', 'swagger_url', 'openapi_url', 'docs_url',
     'encode_multipart_formdata', 'multipart_formdata',
-    'werkzeug', 'flask', 'django',
+    'werkzeug', 'flask', 'django', 'fastapi', 'uvicorn', 'gunicorn',
     'pydantic_core', 'email_validator',
     'JWTError', 'UploadFile', 'get_type_hints',
     'checks', 'sets', 'default', 'redirect_slashes',
+    # More stdlib modules
+    'argparse', 'logging', 'warnings', 'inspect', 'traceback',
+    'importlib', 'pkgutil', 'pkg_resources',
+    'subprocess', 'multiprocessing', 'threading', 'asyncio', 'queue',
+    'json', 'pickle', 'copy', 'os', 'sys', 're',
+    'time', 'datetime', 'calendar', 'random', 'math', 'decimal', 'statistics',
+    'enum', 'abc', 'contextlib', 'tempfile', 'shutil', 'glob', 'fnmatch',
+    'dataclasses', 'functools', 'itertools', 'collections',
+    'pathlib', 'platform', 'socket', 'select', 'selectors',
+    'http', 'ftplib', 'smtplib', 'email',
+    'xml', 'csv', 'configparser',
+    'hashlib', 'hmac', 'secrets', 'ssl',
+    'gzip', 'zlib', 'bz2', 'lzma', 'zipfile', 'tarfile',
+    'io', 'codecs', 'locale', 'gettext',
+    'typing', 'typing_extensions',
+    'getpass', 'pwd', 'grp',
+    'unittest', 'mock', 'pytest',
+    # Common third-party libraries
+    'sqlalchemy', 'alembic', 'sqlmodel',
+    'celery', 'redis', 'memcached',
+    'jinja', 'jinja2', 'mako',
+    'click', 'typer', 'rich', 'loguru', 'structlog',
+    'attrs', 'attr', 'cattrs',
+    'marshmallow', 'wtforms',
+    'cryptography', 'bcrypt', 'passlib', 'jwt', 'pyjwt', 'PyJWT',
+    'setuptools', 'pip', 'poetry', 'hatch', 'flit',
+    'tox', 'nox', 'mypy', 'ruff', 'black', 'isort', 'flake8', 'pylint', 'bandit',
+    'coverage', 'hypothesis',
+    'xarray', 'polars', 'pyarrow', 'dask',
+    'xgboost', 'lightgbm', 'catboost', 'optuna',
+    'wandb', 'mlflow', 'tensorboard',
+    'vllm', 'unsloth', 'peft', 'trl', 'bitsandbytes',
+    'tiktoken', 'tokenizers',
+    'langchain', 'llamaindex', 'chromadb', 'pinecone', 'qdrant', 'faiss',
+    'openai', 'anthropic', 'cohere',
+    'gradio', 'streamlit',
+    # Pytest fixtures / common test vars (frequently backticked in reviews)
+    'caplog', 'mocker', 'monkeypatch', 'tmpdir', 'tmp_path',
+    'capsys', 'capfd', 'recwarn', 'request',
+    # Generic placeholder names (clearly not project-specific identifiers)
+    'obj', 'val', 'var', 'tmp', 'temp', 'idx', 'src', 'dst',
+    'msg', 'err', 'exc', 'res', 'ctx', 'env', 'cfg', 'conf',
+    'cls', 'fn', 'func',
 })
 
 
 def _diff_identifiers(diff: str) -> set[str]:
-    """Extract identifiers from + and - lines of a diff."""
+    """Extract identifiers from a diff hunk — INCLUDING context lines and @@ headers.
+
+    A reviewer can validly reference any symbol visible in the diff context
+    (surrounding function names, imports, unchanged code referenced in the change).
+    Restricting to +/- lines only under-counts the legitimate symbol pool and
+    inflates the hallucination rate on PRs where v4 references context symbols.
+    """
     idents: set[str] = set()
+    in_hunk = False
     for line in diff.splitlines():
-        if not line or line[0] not in "+-":
+        if not line:
             continue
-        if line.startswith(("+++", "---")):
+        # @@ headers often include the enclosing function name (e.g. "@@ ... def foo(...)").
+        # Capture identifiers from them too.
+        if line.startswith("@@"):
+            in_hunk = True
+            for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,40}", line):
+                idents.add(tok)
             continue
-        for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,40}", line):
-            idents.add(tok)
+        # Skip file-level diff metadata lines (paths, hashes, mode bits, etc.).
+        if line.startswith(("+++", "---", "diff ", "index ", "new file", "deleted file",
+                            "similarity index", "rename ", "Binary files", "GIT binary")):
+            continue
+        if in_hunk:
+            # Include +, -, and " " (space-prefixed context) lines. Skip the rare "\" lines
+            # (no-newline-at-end-of-file markers) which carry no useful identifiers.
+            if line[0] in "+- ":
+                for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,40}", line):
+                    idents.add(tok)
     return idents
 
 
@@ -442,6 +527,11 @@ def main():
         help="DEPRECATED: ignored; pairwise uses AnthropicBedrock with AWS credentials",
     )
     ap.add_argument("--skip-pairwise", action="store_true")
+    ap.add_argument(
+        "--skip-base-calibration",
+        action="store_true",
+        help="Skip dual-scoring base_pred (loses base calibration but slightly faster)",
+    )
     args = ap.parse_args()
 
     preds = _load_jsonl(args.preds)
@@ -452,17 +542,35 @@ def main():
     by_id = {row["instance_id"]: row for row in inputs}
     labels_by_instance = [by_id[p["instance_id"]]["reference_comments"] for p in preds]
 
+    def _score(rows, pred_field):
+        """Score all per-row metrics treating `pred_field` as the subject of evaluation.
+
+        Inline-swaps the pred_field into "v4_pred" so the existing metric functions
+        (which read pred["v4_pred"]) work uniformly for v4 or base.
+        """
+        subbed = [{**r, "v4_pred": r.get(pred_field, "")} for r in rows]
+        n = len(subbed)
+        return {
+            "iou_strict_mean": sum(iou_strict(p, l) for p, l in zip(subbed, labels_by_instance)) / n,
+            "iou_lenient_mean": sum(iou_lenient(p, l) for p, l in zip(subbed, labels_by_instance)) / n,
+            "hit_rate_mean": sum(hit_rate(p, l) for p, l in zip(subbed, labels_by_instance)) / n,
+            "hit_rate_strict_mean": sum(hit_rate_strict(p, l) for p, l in zip(subbed, labels_by_instance)) / n,
+            "hallucination_rate_mean": sum(hallucination_rate(p) for p in subbed) / n,
+            "iou_lenient_by_difficulty": breakdown_by_difficulty(subbed, labels_by_instance, iou_lenient),
+            "iou_lenient_by_problem_domain": breakdown_by_problem_domain(subbed, labels_by_instance, iou_lenient),
+            "hit_rate_by_difficulty": breakdown_by_difficulty(subbed, labels_by_instance, hit_rate),
+        }
+
+    v4_metrics = _score(preds, "v4_pred")
     results: dict[str, Any] = {
         "n_instances": len(preds),
-        "iou_strict_mean": sum(iou_strict(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
-        "iou_lenient_mean": sum(iou_lenient(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
-        "hit_rate_mean": sum(hit_rate(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
-        "hit_rate_strict_mean": sum(hit_rate_strict(p, l) for p, l in zip(preds, labels_by_instance)) / len(preds),
-        "hallucination_rate_mean": sum(hallucination_rate(p) for p in preds) / len(preds),
-        "iou_lenient_by_difficulty": breakdown_by_difficulty(preds, labels_by_instance, iou_lenient),
-        "iou_lenient_by_problem_domain": breakdown_by_problem_domain(preds, labels_by_instance, iou_lenient),
-        "hit_rate_by_difficulty": breakdown_by_difficulty(preds, labels_by_instance, hit_rate),
+        **v4_metrics,  # v4 metrics at top level for backward compat
     }
+
+    if not args.skip_base_calibration:
+        # Dual-score base on the same OOD distribution — needed by the decision gate to
+        # distinguish "v4 looks weak" from "the metric undersells everyone equally".
+        results["base"] = _score(preds, "base_pred")
 
     if not args.skip_pairwise:
         results["pairwise"] = pairwise_win(preds, args.api_key)
