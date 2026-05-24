@@ -48,7 +48,7 @@ def _generate(model_path: str, diffs: list[str], tokenizer) -> list[str]:
     from vllm import LLM, SamplingParams
 
     SYSTEM_MSG = "You are a Senior Software Engineer reviewing code changes. Provide clear, actionable feedback."
-    USER_TEMPLATE = "Review this code diff:\n\n```diff\n{diff}\n```"
+    USER_TEMPLATE = "Review the following code diff and provide feedback:\n```diff\n{diff}\n```"
 
     formatted_prompts = []
     for diff in diffs:
