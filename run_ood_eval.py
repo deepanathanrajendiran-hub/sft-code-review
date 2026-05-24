@@ -50,21 +50,36 @@ def _generate(model_path: str, diffs: list[str], tokenizer) -> list[str]:
     SYSTEM_MSG = "You are a Senior Software Engineer reviewing code changes. Provide clear, actionable feedback."
     USER_TEMPLATE = "Review the following code diff and provide feedback:\n```diff\n{diff}\n```"
 
-    formatted_prompts = []
-    for diff in diffs:
-        # Training (sft.ipynb Cell 2 format_prompt) used diff[:3000], but inference
-        # bumps this to 12000 to capture the full content of typical SWE-CARE PRs
-        # (median ~5k chars). The model sees positions it didn't train on; this is
-        # intentional — better to risk attention drift than to systematically truncate
-        # 40% of OOD diffs below their first defect. Budget: 12000 chars ≈ ~3430
-        # tokens, leaves ~600-token margin under max_model_len=8192 minus 4096 output.
-        messages = [
-            {"role": "system", "content": SYSTEM_MSG},
-            {"role": "user", "content": USER_TEMPLATE.format(diff=diff[:12000])},
-        ]
-        formatted_prompts.append(
-            tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        )
+    # Token budget = max_model_len - max_tokens - safety margin.
+    # COUPLING: this constant assumes max_model_len=8192 (LLM() below) and
+    # max_tokens=4096 (SamplingParams below). If either changes, update this too.
+    INPUT_TOKEN_BUDGET = 8192 - 4096 - 100  # = 3996
+
+    def _format_with_budget(diff: str) -> str:
+        """Format a single diff under INPUT_TOKEN_BUDGET, iteratively shrinking on overflow.
+
+        Adversarial diffs (URLs, base64, non-ASCII) can have <2.5 chars/token,
+        so 12000 chars may exceed 4096 tokens. Shrink to 70% and retry until it fits.
+        """
+        truncated_chars = 12000
+        formatted = ""
+        while truncated_chars >= 200:
+            messages = [
+                {"role": "system", "content": SYSTEM_MSG},
+                {"role": "user", "content": USER_TEMPLATE.format(diff=diff[:truncated_chars])},
+            ]
+            formatted = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            token_count = len(tokenizer.encode(formatted))
+            if token_count <= INPUT_TOKEN_BUDGET:
+                return formatted
+            # Over budget — shrink to 70% and retry
+            truncated_chars = int(truncated_chars * 0.7)
+        # Hard floor reached — return what we have; vLLM may still fit it
+        return formatted
+
+    formatted_prompts = [_format_with_budget(diff) for diff in diffs]
 
     llm = LLM(
         model=model_path,
