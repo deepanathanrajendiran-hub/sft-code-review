@@ -12,6 +12,7 @@ import random
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
+import threading
 
 # ---- location extraction ----
 
@@ -303,13 +304,17 @@ def _groupby_avg(preds, labels_by_instance, metric_fn, key_field) -> dict[str, f
 HAIKU_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 _judge_client = None
+_judge_client_lock = threading.Lock()
 
 
 def _get_judge_client():
     global _judge_client
     if _judge_client is None:
-        import anthropic
-        _judge_client = anthropic.AnthropicBedrock(aws_region="us-west-2")
+        with _judge_client_lock:
+            # Double-checked locking — recheck inside the lock
+            if _judge_client is None:
+                import anthropic
+                _judge_client = anthropic.AnthropicBedrock(aws_region="us-west-2")
     return _judge_client
 
 
@@ -390,11 +395,11 @@ def pairwise_win(
             reference=pred.get("reference_text", ""),
         )
 
-    verdicts: list[str] = []
+    verdicts: list[str] = [None] * len(preds)  # type: ignore[list-item]
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(_vote_one, p) for p in preds]
-        for fut in as_completed(futures):
-            verdicts.append(fut.result())
+        future_to_idx = {ex.submit(_vote_one, p): i for i, p in enumerate(preds)}
+        for fut in as_completed(future_to_idx):
+            verdicts[future_to_idx[fut]] = fut.result()
 
     mean_a, lo_a, hi_a = bootstrap_winrate_ci(verdicts, which="A")
     mean_b, lo_b, hi_b = bootstrap_winrate_ci(verdicts, which="B")

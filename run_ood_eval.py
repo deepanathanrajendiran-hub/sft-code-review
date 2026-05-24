@@ -52,6 +52,9 @@ def _generate(model_path: str, diffs: list[str], tokenizer) -> list[str]:
 
     formatted_prompts = []
     for diff in diffs:
+        # Training (sft.ipynb Cell 2 format_prompt) used diff[:3000]; matching that here
+        # keeps inference in-distribution. Median Python PR diff is ~5k chars, so ~40%
+        # of SWE-CARE diffs are truncated — this is a known limitation of v4, not a bug.
         messages = [
             {"role": "system", "content": SYSTEM_MSG},
             {"role": "user", "content": USER_TEMPLATE.format(diff=diff[:3000])},
@@ -108,6 +111,15 @@ def main():
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     print(f"[run_ood_eval] loaded tokenizer from {args.base_model}", flush=True)
+
+    # Sanity: confirm v4 didn't customize chat_template (would silently confound pairwise)
+    v4_tok = AutoTokenizer.from_pretrained(args.v4_model)
+    assert v4_tok.chat_template == tokenizer.chat_template, (
+        f"v4 chat_template differs from base — would silently confound pairwise. "
+        f"Either rebuild v4 with matching template or load tokenizer per-model."
+    )
+    del v4_tok  # release; we only need base
+    print(f"[run_ood_eval] chat_template matches v4_model: OK", flush=True)
 
     print(f"[run_ood_eval] loading v4 ({args.v4_model})", flush=True)
     v4_raw = _generate(args.v4_model, diffs, tokenizer)
