@@ -4,6 +4,7 @@ Pure-Python; no GPU required. Importable from notebooks or callable as CLI.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -580,21 +581,28 @@ def pairwise_win(
     n_votes: int = 3,  # ignored; vote count is baked into judge_fn (V4-Flash: 1, V4-Pro/Haiku: 3)
     max_workers: int = 16,
     judge_fn=None,
+    pred_a_field: str = "v4_pred",
+    pred_b_field: str = "base_pred",
 ) -> dict:
-    """3-vote majority pairwise: v4_pred (A) vs base_pred (B) with order swap and
-    reference review. Returns aggregate dict including bootstrap 95% CI.
+    """3-vote majority pairwise: side-A (default v4_pred) vs side-B (default base_pred)
+    with order swap and reference review. Returns aggregate dict including bootstrap
+    95% CI.
 
     judge_fn defaults to haiku_pairwise_judge_3vote for backward compat with
     library callers; CLI callers select a judge via the --judge flag (defaults
     to v4pro3vote there).
+
+    pred_a_field / pred_b_field let callers compare arbitrary JSONL columns
+    (e.g. v4corpo_pred vs v4_pred for CoRPO eval); defaults preserve the
+    historical v4_pred vs base_pred behaviour.
     """
     if judge_fn is None:
         judge_fn = haiku_pairwise_judge_3vote
 
     def _vote_one(pred):
         return judge_fn(
-            review_a=pred["v4_pred"],
-            review_b=pred["base_pred"],
+            review_a=pred[pred_a_field],
+            review_b=pred[pred_b_field],
             diff=pred.get("diff", ""),
             reference=pred.get("reference_text", ""),
         )
@@ -634,10 +642,8 @@ def _load_jsonl(path: Path | str) -> list[dict]:
     return rows
 
 
-def main():
-    import argparse
-    import os
-
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser. Extracted from main() for testability."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--preds", required=True, help="ood_preds.jsonl")
     ap.add_argument("--labels", required=True, help="ood_input.jsonl")
@@ -659,7 +665,22 @@ def main():
         default="v4pro3vote",
         help="Pairwise judge family: v4pro3vote (default), v4flash (cheap binary), haiku (Bedrock cross-check)",
     )
-    args = ap.parse_args()
+    ap.add_argument(
+        "--pred-a-field",
+        default="v4_pred",
+        help="JSONL field holding side-A prediction (default: v4_pred)",
+    )
+    ap.add_argument(
+        "--pred-b-field",
+        default="base_pred",
+        help="JSONL field holding side-B prediction (default: base_pred)",
+    )
+    return ap
+
+
+
+def main():
+    args = _build_arg_parser().parse_args()
 
     preds = _load_jsonl(args.preds)
     inputs = _load_jsonl(args.labels)
@@ -701,7 +722,11 @@ def main():
 
     if not args.skip_pairwise:
         results["pairwise"] = pairwise_win(
-            preds, args.api_key, judge_fn=_resolve_judge_fn(args.judge)
+            preds,
+            args.api_key,
+            judge_fn=_resolve_judge_fn(args.judge),
+            pred_a_field=args.pred_a_field,
+            pred_b_field=args.pred_b_field,
         )
 
     Path(args.output).write_text(json.dumps(results, indent=2))

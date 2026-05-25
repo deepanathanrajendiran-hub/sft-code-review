@@ -399,3 +399,24 @@ class TestJudgeSelectionFlag:
         from ood_metrics import _resolve_judge_fn
         with pytest.raises(ValueError, match="unknown judge"):
             _resolve_judge_fn("nonsense")
+
+
+class TestPredFieldFlags:
+    def test_field_flags_in_argparser(self):
+        from ood_metrics import _build_arg_parser
+        p = _build_arg_parser()
+        args = p.parse_args([
+            "--preds", "x.jsonl",
+            "--labels", "y.jsonl",
+            "--pred-a-field", "v4corpo_pred",
+            "--pred-b-field", "v4_pred",
+        ])
+        assert args.pred_a_field == "v4corpo_pred"
+        assert args.pred_b_field == "v4_pred"
+
+    def test_field_defaults_backward_compat(self):
+        from ood_metrics import _build_arg_parser
+        p = _build_arg_parser()
+        args = p.parse_args(["--preds", "x.jsonl", "--labels", "y.jsonl"])
+        assert args.pred_a_field == "v4_pred"
+        assert args.pred_b_field == "base_pred"
