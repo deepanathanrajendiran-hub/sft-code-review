@@ -61,3 +61,11 @@ class TestDecide:
             training_diverged=True,
             haiku_cross_check_lift=-5.0,
         )) == "FAILED"
+
+    def test_halluc_regression_boundary_exactly_one_pt_not_failed(self):
+        # halluc_v4corpo == halluc_v4 + 1.0 → NOT failed (rule is "> 1.0", not ">= 1.0")
+        assert decide(**self._inputs(halluc_v4=3.6, halluc_v4corpo=4.6)) == "SHIP"
+
+    def test_halluc_regression_just_above_one_pt_fails(self):
+        # halluc_v4corpo > halluc_v4 + 1.0 → FAILED
+        assert decide(**self._inputs(halluc_v4=3.6, halluc_v4corpo=4.61)) == "FAILED"
