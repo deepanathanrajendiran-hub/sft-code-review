@@ -38,7 +38,8 @@ try:
             return (False, "N/A") if return_version else False
         return _real_is_pkg(pkg_name, return_version)
     _tu_iu._is_package_available = _patched_is_pkg
-    del _tu_iu, _real_is_pkg, _patched_is_pkg
+    # NOTE: do NOT `del` _real_is_pkg — it's a free variable in the closure above.
+    # Python closures bind by name; deleting it breaks the patched function.
 except ImportError:
     pass
 
