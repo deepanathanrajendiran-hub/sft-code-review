@@ -90,15 +90,133 @@ def _check_variance_gate(rewards: np.ndarray, threshold: float = 0.10) -> tuple[
     mean_std = float(per_group_std.mean())
     return mean_std >= threshold, mean_std
 
+def run_training(args: argparse.Namespace) -> None:
+    """Run CoRPO training: load v4 adapter, set up trainer, train num_train_epochs.
+
+    All heavy deps (torch, transformers, peft, trl, datasets) are lazy-imported
+    inside this function. The unit tests for parse_args + verify_v4_backup +
+    _check_variance_gate do NOT need these installed.
+    """
+    import json
+
+    import torch
+    from datasets import Dataset
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from trl import GRPOConfig
+
+    from corpo_trainer import CoRPOTrainer
+    from corpo_reward import composite_reward, load_base_sample_cache
+
+    # 1. Load training prompts and the pre-built base-sample cache
+    with open(args.train_prompts) as fh:
+        prompts = [json.loads(line) for line in fh if line.strip()]
+    base_cache = load_base_sample_cache(args.base_cache)
+    print(
+        f"[corpo_train] loaded {len(prompts)} prompts + {len(base_cache._data)} base samples",
+        file=sys.stderr,
+    )
+
+    # 2. Format prompts via chat template (matches run_ood_eval format)
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    SYSTEM_MSG = (
+        "You are a Senior Software Engineer reviewing code changes. "
+        "Provide clear, actionable feedback."
+    )
+    USER_TEMPLATE = (
+        "Review the following code diff and provide feedback:\n```diff\n{diff}\n```"
+    )
+
+    def _format(p):
+        messages = [
+            {"role": "system", "content": SYSTEM_MSG},
+            {"role": "user", "content": USER_TEMPLATE.format(diff=p["diff"][:12000])},
+        ]
+        p["prompt"] = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        return p
+
+    dataset = Dataset.from_list([_format(p) for p in prompts])
+
+    # 3. Load model with v4 LoRA adapter — continue-training the existing LoRA
+    print(f"[corpo_train] loading {args.base_model} + v4 LoRA", file=sys.stderr)
+    base = AutoModelForCausalLM.from_pretrained(
+        args.base_model,
+        dtype=torch.bfloat16,
+        device_map="auto",
+    )
+    model = PeftModel.from_pretrained(base, args.v4_adapter, is_trainable=True)
+
+    # 4. Reward function — closure captures base_cache
+    def reward_fn(prompts: list[str], completions: list[str], **kwargs) -> list[float]:
+        """TRL GRPO calls this with batched prompts+completions; we score each.
+
+        TRL passes extra dataset columns via kwargs (instance_id, diff, reference_text).
+        """
+        instance_ids = kwargs["instance_id"]
+        diffs = kwargs["diff"]
+        refs = kwargs.get("reference_text", [""] * len(prompts))
+        rewards = []
+        for instance_id, diff, ref, rollout in zip(instance_ids, diffs, refs, completions):
+            base_sample = base_cache.get(instance_id)
+            rewards.append(composite_reward(diff, rollout, base_sample, ref))
+        return rewards
+
+    # 5. Build GRPO config; CoRPOTrainer extends GRPOTrainer
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    grpo_config = GRPOConfig(
+        output_dir=str(output_dir),
+        learning_rate=args.learning_rate,
+        warmup_steps=50,
+        weight_decay=0.1,
+        adam_beta1=0.9,
+        adam_beta2=0.95,
+        beta=args.kl_beta,
+        num_generations=args.num_generations,
+        max_completion_length=args.max_new_tokens,
+        per_device_train_batch_size=args.prompts_per_step,
+        num_train_epochs=args.epochs,
+        save_steps=args.checkpoint_every,
+        logging_steps=10,
+        temperature=1.0,
+        use_vllm=True,
+        vllm_mode="colocate",
+        bf16=True,
+        scale_rewards="none",  # CoRPOTrainer requires this
+    )
+
+    trainer = CoRPOTrainer(
+        model=model,
+        args=grpo_config,
+        train_dataset=dataset,
+        processing_class=tokenizer,
+        reward_funcs=reward_fn,
+        r_min_correct=args.r_min_correct,
+    )
+
+    # 6. Train (resume support added by Task 15)
+    print(
+        f"[corpo_train] starting training; r_min_correct={args.r_min_correct}",
+        file=sys.stderr,
+    )
+    trainer.train(resume_from_checkpoint=args.resume)
+
+    # 7. Save final adapter to output_dir/final/
+    final_path = output_dir / "final"
+    trainer.save_model(str(final_path))
+    print(f"[corpo_train] saved final adapter to {final_path}", file=sys.stderr)
+
+
+
 def main():
     args = parse_args()
     verify_v4_backup(args.v4_backup)
     if args.variance_gate_only:
         passed = run_variance_gate(args)
         sys.exit(0 if passed else 1)
-    # Training loop implemented in Task 14
-    print("[corpo_train] training loop not yet implemented (Task 14)", file=sys.stderr)
-    sys.exit(1)
+    run_training(args)
 
 def _generate_v4_rollouts(
     adapter_path: str,
