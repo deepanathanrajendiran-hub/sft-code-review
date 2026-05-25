@@ -161,14 +161,21 @@ def run_training(args: argparse.Namespace) -> None:
         """TRL GRPO calls this with batched prompts+completions; we score each.
 
         TRL passes extra dataset columns via kwargs (instance_id, diff, reference_text).
+        Parallelized over judge calls (16 workers) — each call is ~1s on V4-Pro
+        non-thinking mode, so 32 calls = ~2s with parallelism vs ~32s serial.
         """
+        from concurrent.futures import ThreadPoolExecutor
+
         instance_ids = kwargs["instance_id"]
         diffs = kwargs["diff"]
         refs = kwargs.get("reference_text", [""] * len(prompts))
-        rewards = []
-        for instance_id, diff, ref, rollout in zip(instance_ids, diffs, refs, completions):
-            base_sample = base_cache.get(instance_id)
-            rewards.append(composite_reward(diff, rollout, base_sample, ref))
+
+        def _score_one(i: int) -> float:
+            base_sample = base_cache.get(instance_ids[i])
+            return composite_reward(diffs[i], completions[i], base_sample, refs[i])
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            rewards = list(executor.map(_score_one, range(len(prompts))))
         return rewards
 
     # 5. Build GRPO config; CoRPOTrainer extends GRPOTrainer
@@ -323,16 +330,28 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
         args.v4_adapter, args.base_model, sample, args.num_generations, args.max_new_tokens
     )
 
-    rewards = np.zeros((len(sample), args.num_generations))
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _score_one(work_item):
+        i, j, prompt, rollout, base = work_item
+        return i, j, composite_reward(
+            diff=prompt["diff"],
+            rollout=rollout,
+            base_sample=base,
+            reference=prompt.get("reference_text", ""),
+        )
+
+    work = []
     for i, prompt in enumerate(sample):
         base = base_cache.get(prompt["instance_id"])
         for j, rollout in enumerate(rollouts_by_prompt[i]):
-            rewards[i, j] = composite_reward(
-                diff=prompt["diff"],
-                rollout=rollout,
-                base_sample=base,
-                reference=prompt.get("reference_text", ""),
-            )
+            work.append((i, j, prompt, rollout, base))
+
+    rewards = np.zeros((len(sample), args.num_generations))
+    print(f"[variance-gate] scoring {len(work)} (prompt, rollout) pairs in parallel...", file=sys.stderr)
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        for i, j, r in executor.map(_score_one, work):
+            rewards[i, j] = r
 
     passed, mean_std = _check_variance_gate(rewards, threshold=0.10)
     print(f"[variance-gate] mean within-group std = {mean_std:.4f} (threshold 0.10)", file=sys.stderr)
