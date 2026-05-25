@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import types
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -100,3 +101,34 @@ class TestCoRPOAdvantages:
             adv,
             torch.tensor([-0.5, -0.3, -0.1, -0.2, 0.0, 0.2]),
         )
+
+class TestScaleRewardsCheck:
+    def test_raises_when_scale_rewards_not_none(self):
+        """Verify the safety check fires when GRPOConfig has scale_rewards != 'none'."""
+        from unittest.mock import MagicMock
+
+        # Construct CoRPOTrainer.__init__ scope without invoking super (which needs TRL+model)
+        # by patching super().__init__ to a no-op
+        with patch("corpo_trainer.GRPOTrainer.__init__", return_value=None):
+            mock_args = MagicMock()
+            mock_args.scale_rewards = "standard"  # Anything except "none"
+
+            with pytest.raises(ValueError, match="scale_rewards"):
+                # Need to set self.args before the check runs
+                trainer = CoRPOTrainer.__new__(CoRPOTrainer)
+                trainer.args = mock_args
+                # Manually invoke just the validation block
+                CoRPOTrainer.__init__(trainer, args=mock_args)
+
+    def test_passes_when_scale_rewards_is_none(self):
+        """No raise when scale_rewards is 'none'."""
+        from unittest.mock import MagicMock
+
+        with patch("corpo_trainer.GRPOTrainer.__init__", return_value=None):
+            mock_args = MagicMock()
+            mock_args.scale_rewards = "none"
+
+            trainer = CoRPOTrainer.__new__(CoRPOTrainer)
+            trainer.args = mock_args
+            # Should not raise
+            CoRPOTrainer.__init__(trainer, args=mock_args)

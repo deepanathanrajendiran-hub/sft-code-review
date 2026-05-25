@@ -48,7 +48,7 @@ class CoRPOTrainer(GRPOTrainer):
         self.r_min_correct = r_min_correct
         self._last_raw_rewards: torch.Tensor | None = None
 
-        scale = getattr(self, "scale_rewards", "none")
+        scale = getattr(self.args, "scale_rewards", "none")
         if scale != "none":
             raise ValueError(
                 f"CoRPOTrainer requires GRPOConfig.scale_rewards='none' "
