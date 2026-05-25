@@ -1,11 +1,19 @@
 """Unit tests for corpo_reward.py components."""
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
 
-from corpo_reward import hallucination_score, length_sanity_score, pairwise_score, composite_reward
+from corpo_reward import (
+    BaseSampleCache,
+    composite_reward,
+    hallucination_score,
+    length_sanity_score,
+    load_base_sample_cache,
+    pairwise_score,
+)
 
 
 class TestLengthSanity:
@@ -128,3 +136,21 @@ class TestCompositeReward:
         with patch("corpo_reward._judge_fn", return_value="B"):
             r = composite_reward(sample_diff, "x" * 12000, "base", "ref")
             assert 0.0 <= r <= 1.0
+
+
+class TestBaseSampleCache:
+    def test_load_returns_cache_with_lookup(self, tmp_path):
+        cache_path = tmp_path / "base.jsonl"
+        with cache_path.open("w") as fh:
+            fh.write(json.dumps({"instance_id": "id_1", "base_output": "B1"}) + "\n")
+            fh.write(json.dumps({"instance_id": "id_2", "base_output": "B2"}) + "\n")
+        cache: BaseSampleCache = load_base_sample_cache(cache_path)
+        assert cache.get("id_1") == "B1"
+        assert cache.get("id_2") == "B2"
+
+    def test_missing_id_raises(self, tmp_path):
+        cache_path = tmp_path / "base.jsonl"
+        cache_path.write_text(json.dumps({"instance_id": "id_1", "base_output": "B1"}) + "\n")
+        cache = load_base_sample_cache(cache_path)
+        with pytest.raises(KeyError, match="id_99"):
+            cache.get("id_99")

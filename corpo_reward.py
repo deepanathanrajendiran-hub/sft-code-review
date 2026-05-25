@@ -13,6 +13,11 @@ This module is built incrementally:
 from __future__ import annotations
 from ood_metrics import hallucination_rate as _ood_hallucination_rate
 from ood_metrics import deepseek_v4flash_pairwise_judge
+import argparse
+import json
+import sys
+from dataclasses import dataclass
+from pathlib import Path
 
 
 def length_sanity_score(text: str) -> float:
@@ -106,3 +111,70 @@ def composite_reward(
         + HALLUC_WEIGHT * r_halluc
         + LENGTH_WEIGHT * r_length
     )
+
+@dataclass
+class BaseSampleCache:
+    """In-memory base-sample lookup (instance_id -> base_output)."""
+    _data: dict[str, str]
+
+    def get(self, instance_id: str) -> str:
+        if instance_id not in self._data:
+            raise KeyError(f"no cached base sample for {instance_id!r}")
+        return self._data[instance_id]
+
+def load_base_sample_cache(path: Path | str) -> BaseSampleCache:
+    """Load base-sample cache from JSONL (one {instance_id, base_output} per line)."""
+    data: dict[str, str] = {}
+    with Path(path).open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            data[row["instance_id"]] = row["base_output"]
+    return BaseSampleCache(_data=data)
+
+def _build_base_cache_cli():
+    """CLI: generate one base-model rollout per training prompt, save to disk.
+
+    Called via:
+        python corpo_reward.py --build-base-cache \\
+            --input train_prompts.jsonl \\
+            --output cache/base_samples.jsonl \\
+            --base-model unsloth/Qwen2.5-Coder-7B-Instruct
+
+    Uses the same generation params as run_ood_eval.py (temp=0, max_tokens=4096,
+    rep_pen=1.1) for protocol parity with the production v4 inference.
+    """
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--build-base-cache", action="store_true", required=True)
+    ap.add_argument("--input", required=True, help="train_prompts.jsonl from swecare_split")
+    ap.add_argument("--output", required=True, help="cache/base_samples.jsonl")
+    ap.add_argument("--base-model", default="unsloth/Qwen2.5-Coder-7B-Instruct")
+    args = ap.parse_args()
+
+    # Reuse run_ood_eval._generate exactly — same chat template, same sampling.
+    from run_ood_eval import _generate
+    from transformers import AutoTokenizer
+
+    rows = []
+    with Path(args.input).open() as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    diffs = [r["diff"] for r in rows]
+    print(f"[corpo_reward] generating {len(diffs)} base samples", file=sys.stderr)
+    base_outputs = _generate(args.base_model, diffs, tokenizer)
+
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w") as fh:
+        for row, out in zip(rows, base_outputs):
+            fh.write(json.dumps({"instance_id": row["instance_id"], "base_output": out}) + "\n")
+    print(f"[corpo_reward] wrote {len(rows)} base samples to {out_path}", file=sys.stderr)
+
+if __name__ == "__main__":
+    _build_base_cache_cli()
