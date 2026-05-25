@@ -1,8 +1,8 @@
-"""Seeded 80/20 train/eval split of SWE-CARE OOD prompts.
+"""Seeded train/eval split helper.
 
-The 632-row OOD eval set lives at ood_input.jsonl. CoRPO trains on the 80%
-train slice; the 20% eval slice is used for variance-gate sanity but NOT for
-the final OOD pairwise eval (which uses the full 632 rows).
+Generic 80/20 (or other ratio) random splitter for any list-of-dicts dataset.
+NOTE: the CoRPO notebook trains on the SWE-CARE dev split and evals on test;
+this splitter is retained for future tasks that need to subdivide one corpus.
 """
 from __future__ import annotations
 

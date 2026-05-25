@@ -1,8 +1,12 @@
-"""Download SWE-CARE test split and emit an OOD eval input file.
+"""Download a SWE-CARE split and emit an OOD eval / training input file.
 
-Excludes rows whose repository name overlaps with our 4 training repos
-(transformers, sklearn, pydantic, fastapi). Match is by lowercased name
-suffix; owner is ignored.
+Supports two splits:
+- ``test`` (671 raw rows) -- the held-out OOD eval set; default for backward compat.
+- ``dev`` (7086 raw rows) -- the larger pool used for CoRPO training prompts.
+
+Both splits go through the same repo-overlap filter: rows whose repository name
+matches one of our 4 training repos (transformers, sklearn, pydantic, fastapi)
+are dropped. Match is by lowercased name suffix; owner is ignored.
 """
 from __future__ import annotations
 
@@ -75,8 +79,20 @@ def map_swecare_row(row: dict) -> dict:
     }
 
 
-def load_and_filter(train_jsonl: Path | str, dry_run: int | None = None) -> list[dict]:
-    """Load SWE-CARE test split, drop overlap, return list of preprocessed rows.
+def load_and_filter(
+    train_jsonl: Path | str,
+    dry_run: int | None = None,
+    split: str = "test",
+) -> list[dict]:
+    """Load a SWE-CARE split, drop overlap, return list of preprocessed rows.
+
+    Args:
+        train_jsonl: Path to training JSONL file used to derive the exclusion repo set.
+        dry_run: If set, only process the first N rows of the split.
+        split: SWE-CARE split name to load. "test" (671 raw rows) is the historical
+            default and is reserved for OOD eval. "dev" (7086 raw rows) is the larger
+            split used for CoRPO training prompts. Both splits go through the same
+            repo-overlap filter.
 
     If filtered set is < 300 rows, this function logs a warning to stderr.
     """
@@ -85,7 +101,7 @@ def load_and_filter(train_jsonl: Path | str, dry_run: int | None = None) -> list
     train_names = get_train_repo_names(train_jsonl)
     print(f"[swecare_loader] excluding train repos: {sorted(train_names)}", file=sys.stderr)
 
-    ds = load_dataset("inclusionAI/SWE-CARE", split="test")
+    ds = load_dataset("inclusionAI/SWE-CARE", split=split)
     if dry_run is not None:
         ds = ds.select(range(min(dry_run, len(ds))))
 
@@ -98,7 +114,7 @@ def load_and_filter(train_jsonl: Path | str, dry_run: int | None = None) -> list
         out.append(map_swecare_row(row))
 
     print(
-        f"[swecare_loader] kept {len(out)} / {len(out) + excluded} rows "
+        f"[swecare_loader] split={split} kept {len(out)} / {len(out) + excluded} rows "
         f"({excluded} excluded by repo-overlap)",
         file=sys.stderr,
     )
@@ -116,9 +132,16 @@ def main():
     ap.add_argument("--output", default="ood_input.jsonl")
     ap.add_argument("--train-jsonl", default="train_dataset_clean.jsonl")
     ap.add_argument("--dry-run", type=int, default=None, help="Only process N rows")
+    ap.add_argument(
+        "--split",
+        choices=["test", "dev"],
+        default="test",
+        help="SWE-CARE split to load. 'test' (default, 671 raw rows) reserved for "
+             "OOD eval; 'dev' (7086 raw rows) used for CoRPO training prompts.",
+    )
     args = ap.parse_args()
 
-    rows = load_and_filter(args.train_jsonl, args.dry_run)
+    rows = load_and_filter(args.train_jsonl, args.dry_run, split=args.split)
     out_path = Path(args.output)
     with out_path.open("w") as fh:
         for row in rows:
