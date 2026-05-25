@@ -495,23 +495,30 @@ def _get_deepseek_client():
     return _deepseek_client
 
 
+def _deepseek_pairwise_judge(
+    model: str, review_a: str, review_b: str, diff: str, reference: str
+) -> str:
+    """Shared implementation: one-call binary judge against a DeepSeek model."""
+    swap = random.random() > 0.5
+    ra, rb = (review_b, review_a) if swap else (review_a, review_b)
+    client = _get_deepseek_client()
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=4,
+        messages=[{"role": "user", "content": _build_pairwise_prompt(diff, reference, ra, rb)}],
+    )
+    return _parse_pairwise_result(resp.choices[0].message.content, swap)
+
+
 def deepseek_v4flash_pairwise_judge(
     review_a: str, review_b: str, diff: str, reference: str
 ) -> str:
     """One call. Randomized A/B order. Returns 'A', 'B', or 'TIE'.
 
-    Mirrors haiku_pairwise_judge() prompt + truncations for protocol parity.
+    Cheap judge for CoRPO training rollouts (not eval). Mirrors haiku_pairwise_judge
+    prompt + truncations for protocol parity.
     """
-    swap = random.random() > 0.5
-    ra, rb = (review_b, review_a) if swap else (review_a, review_b)
-
-    client = _get_deepseek_client()
-    resp = client.chat.completions.create(
-        model=DEEPSEEK_V4_FLASH,
-        max_tokens=4,
-        messages=[{"role": "user", "content": _build_pairwise_prompt(diff, reference, ra, rb)}],
-    )
-    return _parse_pairwise_result(resp.choices[0].message.content, swap)
+    return _deepseek_pairwise_judge(DEEPSEEK_V4_FLASH, review_a, review_b, diff, reference)
 
 
 def deepseek_v4pro_pairwise_judge(
@@ -521,15 +528,7 @@ def deepseek_v4pro_pairwise_judge(
 
     Used by eval (not training); training uses the cheaper V4-Flash judge.
     """
-    swap = random.random() > 0.5
-    ra, rb = (review_b, review_a) if swap else (review_a, review_b)
-    client = _get_deepseek_client()
-    resp = client.chat.completions.create(
-        model=DEEPSEEK_V4_PRO,
-        max_tokens=4,
-        messages=[{"role": "user", "content": _build_pairwise_prompt(diff, reference, ra, rb)}],
-    )
-    return _parse_pairwise_result(resp.choices[0].message.content, swap)
+    return _deepseek_pairwise_judge(DEEPSEEK_V4_PRO, review_a, review_b, diff, reference)
 
 
 def deepseek_v4pro_pairwise_judge_3vote(
