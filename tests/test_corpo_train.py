@@ -129,3 +129,25 @@ class TestResumeFlag:
             "--output-dir", "/o",
         ])
         assert args.resume is None
+
+class TestCopyToFlag:
+    def test_copy_to_path_parsed(self):
+        args = parse_args([
+            "--v4-adapter", "/v4",
+            "--v4-backup", "/bkup",
+            "--train-prompts", "p.jsonl",
+            "--base-cache", "b.jsonl",
+            "--output-dir", "/o",
+            "--copy-to", "/content/drive/MyDrive/sft/code-reviewer-lora-v4-corpo",
+        ])
+        assert args.copy_to == "/content/drive/MyDrive/sft/code-reviewer-lora-v4-corpo"
+
+    def test_copy_to_default_is_none(self):
+        args = parse_args([
+            "--v4-adapter", "/v4",
+            "--v4-backup", "/bkup",
+            "--train-prompts", "p.jsonl",
+            "--base-cache", "b.jsonl",
+            "--output-dir", "/o",
+        ])
+        assert args.copy_to is None

@@ -57,6 +57,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Run pre-training variance check on 50 prompts and exit (Task 13)")
     ap.add_argument("--resume", default=None,
                     help="Resume from checkpoint directory")
+    ap.add_argument(
+        "--copy-to",
+        default=None,
+        help="After training, copy final adapter to this path (e.g., Drive). Uses shutil.copytree.",
+    )
     return ap.parse_args(argv)
 
 
@@ -207,6 +212,13 @@ def run_training(args: argparse.Namespace) -> None:
     final_path = output_dir / "final"
     trainer.save_model(str(final_path))
     print(f"[corpo_train] saved final adapter to {final_path}", file=sys.stderr)
+    if args.copy_to:
+        import shutil
+        dest = Path(args.copy_to)
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(final_path, dest)
+        print(f"[corpo_train] copied final adapter to {dest}", file=sys.stderr)
 
 
 
