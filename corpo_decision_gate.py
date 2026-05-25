@@ -65,11 +65,11 @@ def decide(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--v4-baseline-json", required=True,
-                    help="JSON with v4-as-A vs v4-as-B baseline win-rate by V4-Pro (sanity, ~50%%)")
+                    help="ood_metrics.py output for original v4 baseline (provides halluc_v4)")
     ap.add_argument("--corpo-eval-json", required=True,
-                    help="JSON with v4-corpo vs v4 win-rate by V4-Pro 3-vote (includes ci_lo, ci_hi)")
+                    help="ood_metrics.py output for v4-corpo vs v4 (provides pairwise + halluc_v4corpo + per-domain)")
     ap.add_argument("--haiku-cross-check-json", required=True,
-                    help="JSON with v4-corpo vs v4 win-rate by Bedrock Haiku (100-prompt subset)")
+                    help="ood_metrics.py output for v4-corpo vs v4 with --judge haiku (Goodhart guard)")
     ap.add_argument("--variance-gate-passed", action="store_true",
                     help="Set if pre-training variance gate passed")
     ap.add_argument("--training-diverged", action="store_true",
@@ -77,26 +77,49 @@ def main():
     args = ap.parse_args()
 
     corpo = json.loads(Path(args.corpo_eval_json).read_text())
+    baseline = json.loads(Path(args.v4_baseline_json).read_text())
     haiku = json.loads(Path(args.haiku_cross_check_json).read_text())
+
+    # Pairwise (all in [0, 1] from ood_metrics; convert to percent)
+    pw = corpo.get("pairwise", {})
+    winrate_pct = pw.get("win_rate", 0.0) * 100.0
+    ci_lo = pw.get("win_rate_ci_lo", 0.0) * 100.0
+    ci_hi = pw.get("win_rate_ci_hi", 0.0) * 100.0
+
+    # Hallucination (in [0, 1] from ood_metrics; convert to percent)
+    halluc_v4 = baseline.get("hallucination_rate_mean", 0.0) * 100.0
+    halluc_v4corpo = corpo.get("hallucination_rate_mean", 0.0) * 100.0
+
+    # Per-domain spread = max - min IoU across problem_domain buckets (in percent points)
+    per_domain = corpo.get("iou_lenient_by_problem_domain", {}) or {}
+    if per_domain:
+        values_pct = [v * 100.0 for v in per_domain.values() if isinstance(v, (int, float))]
+        per_domain_spread = max(values_pct) - min(values_pct) if values_pct else 0.0
+    else:
+        per_domain_spread = 0.0
+
+    # Haiku cross-check lift (point estimate; no CI needed at N=100)
+    haiku_winrate_pct = haiku.get("pairwise", {}).get("win_rate", 0.0) * 100.0
+    haiku_cross_check_lift = haiku_winrate_pct - 50.0
 
     verdict = decide(
         variance_gate_passed=args.variance_gate_passed,
         training_diverged=args.training_diverged,
-        v4corpo_wins_pct=corpo["winrate_pct"],
-        ci_lo=corpo["ci_lo"],
-        ci_hi=corpo["ci_hi"],
-        halluc_v4=corpo.get("halluc_v4", 0.0),
-        halluc_v4corpo=corpo.get("halluc_v4corpo", 0.0),
-        haiku_cross_check_lift=haiku["winrate_pct"] - 50.0,
-        per_domain_spread=corpo.get("per_domain_spread", 0.0),
+        v4corpo_wins_pct=winrate_pct,
+        ci_lo=ci_lo,
+        ci_hi=ci_hi,
+        halluc_v4=halluc_v4,
+        halluc_v4corpo=halluc_v4corpo,
+        haiku_cross_check_lift=haiku_cross_check_lift,
+        per_domain_spread=per_domain_spread,
     )
     print("=" * 60)
     print("PHASE C CORPO DECISION GATE")
     print("=" * 60)
-    print(f"v4-corpo wins vs v4:   {corpo['winrate_pct']:.1f}%  [CI {corpo['ci_lo']:.1f}%-{corpo['ci_hi']:.1f}%]")
-    print(f"Haiku cross-check:     {haiku['winrate_pct']:.1f}%  (lift {haiku['winrate_pct']-50.0:+.1f}pt)")
-    print(f"Halluc:                v4 {corpo.get('halluc_v4',0):.1f}% -> v4-corpo {corpo.get('halluc_v4corpo',0):.1f}%")
-    print(f"Per-domain spread:     {corpo.get('per_domain_spread',0):.1f}pt")
+    print(f"v4-corpo wins vs v4:   {winrate_pct:.1f}%  [CI {ci_lo:.1f}%-{ci_hi:.1f}%]")
+    print(f"Haiku cross-check:     {haiku_winrate_pct:.1f}%  (lift {haiku_cross_check_lift:+.1f}pt)")
+    print(f"Halluc:                v4 {halluc_v4:.1f}% -> v4-corpo {halluc_v4corpo:.1f}%")
+    print(f"Per-domain spread:     {per_domain_spread:.1f}pt")
     print("-" * 60)
     print(f"VERDICT: {verdict}")
     print("=" * 60)

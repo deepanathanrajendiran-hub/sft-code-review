@@ -44,66 +44,50 @@ def test_variance_gate_only_aborts_on_missing_backup(tmp_path):
 
 
 def test_decision_gate_ship_verdict(tmp_path):
-    """corpo_decision_gate.py prints VERDICT: SHIP on synthetic clean-pass JSONs."""
+    """corpo_decision_gate.py prints VERDICT: SHIP on synthetic clean-pass JSONs (real ood_metrics schema)."""
     corpo = tmp_path / "corpo.json"
     corpo.write_text(json.dumps({
-        "winrate_pct": 53.0,
-        "ci_lo": 51.0,
-        "ci_hi": 55.0,
-        "halluc_v4": 3.6,
-        "halluc_v4corpo": 3.5,
-        "per_domain_spread": 4.0,
+        "hallucination_rate_mean": 0.035,  # 3.5%
+        "iou_lenient_by_problem_domain": {"general": 0.08, "framework": 0.07, "data": 0.09},
+        "pairwise": {"win_rate": 0.53, "win_rate_ci_lo": 0.51, "win_rate_ci_hi": 0.55},
     }))
     haiku = tmp_path / "haiku.json"
-    haiku.write_text(json.dumps({"winrate_pct": 52.0}))
+    haiku.write_text(json.dumps({"pairwise": {"win_rate": 0.52}}))
     baseline = tmp_path / "baseline.json"
-    baseline.write_text(json.dumps({"winrate_pct": 50.0}))
+    baseline.write_text(json.dumps({"hallucination_rate_mean": 0.036}))  # 3.6%
 
-    result = subprocess.run(
-        [
-            PYTHON, "corpo_decision_gate.py",
-            "--v4-baseline-json", str(baseline),
-            "--corpo-eval-json", str(corpo),
-            "--haiku-cross-check-json", str(haiku),
-            "--variance-gate-passed",
-        ],
-        capture_output=True,
-        text=True,
-        cwd=str(REPO_ROOT),
-    )
+    result = subprocess.run([
+        PYTHON, "corpo_decision_gate.py",
+        "--v4-baseline-json", str(baseline),
+        "--corpo-eval-json", str(corpo),
+        "--haiku-cross-check-json", str(haiku),
+        "--variance-gate-passed",
+    ], capture_output=True, text=True, cwd=str(REPO_ROOT))
 
     assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
-    assert "VERDICT: SHIP" in result.stdout, f"stdout: {result.stdout}"
+    assert "VERDICT: SHIP" in result.stdout
 
 
 def test_decision_gate_aborted_when_variance_gate_flag_omitted(tmp_path):
-    """corpo_decision_gate.py prints VERDICT: ABORTED when --variance-gate-passed is omitted."""
+    """corpo_decision_gate.py prints VERDICT: ABORTED when --variance-gate-passed is omitted (real ood_metrics schema)."""
     corpo = tmp_path / "corpo.json"
     corpo.write_text(json.dumps({
-        "winrate_pct": 53.0,
-        "ci_lo": 51.0,
-        "ci_hi": 55.0,
-        "halluc_v4": 3.6,
-        "halluc_v4corpo": 3.5,
-        "per_domain_spread": 4.0,
+        "hallucination_rate_mean": 0.035,
+        "iou_lenient_by_problem_domain": {"general": 0.08, "framework": 0.07, "data": 0.09},
+        "pairwise": {"win_rate": 0.53, "win_rate_ci_lo": 0.51, "win_rate_ci_hi": 0.55},
     }))
     haiku = tmp_path / "haiku.json"
-    haiku.write_text(json.dumps({"winrate_pct": 52.0}))
+    haiku.write_text(json.dumps({"pairwise": {"win_rate": 0.52}}))
     baseline = tmp_path / "baseline.json"
-    baseline.write_text(json.dumps({"winrate_pct": 50.0}))
+    baseline.write_text(json.dumps({"hallucination_rate_mean": 0.036}))
 
-    result = subprocess.run(
-        [
-            PYTHON, "corpo_decision_gate.py",
-            "--v4-baseline-json", str(baseline),
-            "--corpo-eval-json", str(corpo),
-            "--haiku-cross-check-json", str(haiku),
-            # --variance-gate-passed NOT included
-        ],
-        capture_output=True,
-        text=True,
-        cwd=str(REPO_ROOT),
-    )
+    result = subprocess.run([
+        PYTHON, "corpo_decision_gate.py",
+        "--v4-baseline-json", str(baseline),
+        "--corpo-eval-json", str(corpo),
+        "--haiku-cross-check-json", str(haiku),
+        # --variance-gate-passed NOT included
+    ], capture_output=True, text=True, cwd=str(REPO_ROOT))
 
     assert result.returncode == 0
     assert "VERDICT: ABORTED" in result.stdout, f"stdout: {result.stdout}"
