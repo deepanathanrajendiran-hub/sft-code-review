@@ -26,6 +26,31 @@ Constraints:
 """
 from __future__ import annotations
 
+# Workaround for TRL 0.24's vllm_ascend import bug on CUDA-only systems.
+# `trl/extras/vllm_client.py` unconditionally imports vllm_ascend.distributed
+# even when is_vllm_ascend_available() should return False. Stub the module
+# so the import succeeds; the stub is never exercised because we run on CUDA.
+# Remove this block when TRL fixes the conditional import upstream.
+import sys as _sys
+import types as _types
+if "vllm_ascend" not in _sys.modules:
+    _stub = _types.ModuleType("vllm_ascend")
+    _stub.distributed = _types.ModuleType("vllm_ascend.distributed")
+    _stub.distributed.device_communicators = _types.ModuleType(
+        "vllm_ascend.distributed.device_communicators"
+    )
+    _pyhccl = _types.ModuleType(
+        "vllm_ascend.distributed.device_communicators.pyhccl"
+    )
+    _pyhccl.PyHcclCommunicator = type("PyHcclCommunicator", (), {})
+    _stub.distributed.device_communicators.pyhccl = _pyhccl
+    _sys.modules["vllm_ascend"] = _stub
+    _sys.modules["vllm_ascend.distributed"] = _stub.distributed
+    _sys.modules["vllm_ascend.distributed.device_communicators"] = (
+        _stub.distributed.device_communicators
+    )
+    _sys.modules["vllm_ascend.distributed.device_communicators.pyhccl"] = _pyhccl
+
 import torch
 from trl import GRPOTrainer
 
