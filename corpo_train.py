@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+import numpy as np
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -77,16 +78,131 @@ def verify_v4_backup(backup_path: str) -> None:
     print(f"[corpo_train] verified v4 backup at {backup_path}", file=sys.stderr)
 
 
+def _check_variance_gate(rewards: np.ndarray, threshold: float = 0.10) -> tuple[bool, float]:
+    """Return (passed, mean_within_group_std).
+
+    rewards: shape (n_prompts, num_generations). Each row = one prompt's G rollouts.
+    threshold: minimum mean within-group std required to consider reward signal usable.
+    """
+    if rewards.ndim != 2:
+        raise ValueError(f"expected 2D rewards (n_prompts, G), got shape {rewards.shape}")
+    per_group_std = rewards.std(axis=1)
+    mean_std = float(per_group_std.mean())
+    return mean_std >= threshold, mean_std
+
 def main():
     args = parse_args()
     verify_v4_backup(args.v4_backup)
     if args.variance_gate_only:
-        # Variance gate implemented in Task 13
-        print("[corpo_train] --variance-gate-only not yet implemented (Task 13)", file=sys.stderr)
-        sys.exit(1)
+        passed = run_variance_gate(args)
+        sys.exit(0 if passed else 1)
     # Training loop implemented in Task 14
     print("[corpo_train] training loop not yet implemented (Task 14)", file=sys.stderr)
     sys.exit(1)
+
+def _generate_v4_rollouts(
+    adapter_path: str,
+    base_model: str,
+    prompts: list[dict],
+    num_generations: int,
+    max_new_tokens: int,
+) -> list[list[str]]:
+    """vLLM-generate num_generations rollouts per prompt using base+adapter.
+
+    Returns list of length len(prompts), each containing num_generations strings.
+    Uses temperature=1.0 (CoRPO paper) for diversity.
+
+    Lazy-imports vLLM and transformers — only invoked when running on Colab GPU.
+    """
+    import gc
+
+    from vllm import LLM, SamplingParams
+    from transformers import AutoTokenizer
+    from run_ood_eval import _extract_review
+
+    tokenizer = AutoTokenizer.from_pretrained(base_model)
+
+    SYSTEM_MSG = "You are a Senior Software Engineer reviewing code changes. Provide clear, actionable feedback."
+    USER_TEMPLATE = "Review the following code diff and provide feedback:\n```diff\n{diff}\n```"
+
+    formatted = []
+    for p in prompts:
+        messages = [
+            {"role": "system", "content": SYSTEM_MSG},
+            {"role": "user", "content": USER_TEMPLATE.format(diff=p["diff"][:12000])},
+        ]
+        formatted.append(tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        ))
+
+    llm = LLM(
+        model=adapter_path,
+        gpu_memory_utilization=0.85,
+        max_model_len=8192,
+    )
+    sp = SamplingParams(
+        temperature=1.0,
+        max_tokens=max_new_tokens,
+        n=num_generations,
+        repetition_penalty=1.1,
+    )
+    outputs = llm.generate(formatted, sp)
+    result: list[list[str]] = []
+    for o in outputs:
+        rollouts = [_extract_review(comp.text) for comp in o.outputs]
+        result.append(rollouts)
+
+    del llm
+    gc.collect()
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    return result
+
+
+def run_variance_gate(args: argparse.Namespace) -> bool:
+    """Generate 8 rollouts × 50 prompts with v4 policy; check reward spread.
+
+    Returns True if mean within-group std >= 0.10. Prints histogram + verdict to stderr.
+    """
+    import json
+    import random
+    from corpo_reward import composite_reward, load_base_sample_cache
+
+    # Load 50 random train prompts
+    with open(args.train_prompts) as fh:
+        all_prompts = [json.loads(line) for line in fh if line.strip()]
+    rng = random.Random(42)
+    sample = rng.sample(all_prompts, min(50, len(all_prompts)))
+
+    base_cache = load_base_sample_cache(args.base_cache)
+
+    print(f"[variance-gate] generating {len(sample)} x {args.num_generations} v4 rollouts", file=sys.stderr)
+    rollouts_by_prompt = _generate_v4_rollouts(
+        args.v4_adapter, args.base_model, sample, args.num_generations, args.max_new_tokens
+    )
+
+    rewards = np.zeros((len(sample), args.num_generations))
+    for i, prompt in enumerate(sample):
+        base = base_cache.get(prompt["instance_id"])
+        for j, rollout in enumerate(rollouts_by_prompt[i]):
+            rewards[i, j] = composite_reward(
+                diff=prompt["diff"],
+                rollout=rollout,
+                base_sample=base,
+                reference=prompt.get("reference_text", ""),
+            )
+
+    passed, mean_std = _check_variance_gate(rewards, threshold=0.10)
+    print(f"[variance-gate] mean within-group std = {mean_std:.4f} (threshold 0.10)", file=sys.stderr)
+    print(f"[variance-gate] reward histogram (bins of 0.1):", file=sys.stderr)
+    hist, edges = np.histogram(rewards.ravel(), bins=10, range=(0, 1))
+    for h, e in zip(hist, edges[:-1]):
+        print(f"  [{e:.1f}, {e+0.1:.1f}): {'#' * min(h, 60)}  ({h})", file=sys.stderr)
+    print(f"[variance-gate] verdict: {'PASS' if passed else 'FAIL'}", file=sys.stderr)
+    return passed
 
 
 if __name__ == "__main__":

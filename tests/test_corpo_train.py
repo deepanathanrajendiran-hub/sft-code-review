@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from corpo_train import parse_args, verify_v4_backup
@@ -76,3 +77,33 @@ class TestVerifyBackup:
         empty.mkdir()
         with pytest.raises(ValueError, match="adapter_config.json"):
             verify_v4_backup(str(empty))
+
+class TestVarianceGate:
+    def test_pass_when_std_above_threshold(self):
+        from corpo_train import _check_variance_gate
+        # 50 prompts × 8 rollouts; rewards have std=0.2 per group → mean std > 0.10
+        rewards = np.random.default_rng(0).normal(0.5, 0.2, size=(50, 8))
+        passed, mean_std = _check_variance_gate(rewards, threshold=0.10)
+        assert passed is True
+        assert mean_std > 0.10
+
+    def test_fail_when_std_below_threshold(self):
+        from corpo_train import _check_variance_gate
+        # All rewards same in each group → std=0
+        rewards = np.full((50, 8), 0.5)
+        passed, mean_std = _check_variance_gate(rewards, threshold=0.10)
+        assert passed is False
+        assert mean_std == 0.0
+
+    def test_threshold_boundary_inclusive(self):
+        from corpo_train import _check_variance_gate
+        # Exactly at threshold → pass
+        rewards = np.zeros((10, 8))
+        rewards[:, 0] = 0.2  # introduce some spread
+        passed, _ = _check_variance_gate(rewards, threshold=0.0)
+        assert passed is True
+
+    def test_wrong_dim_raises(self):
+        from corpo_train import _check_variance_gate
+        with pytest.raises(ValueError, match="expected 2D"):
+            _check_variance_gate(np.zeros(40), threshold=0.10)
