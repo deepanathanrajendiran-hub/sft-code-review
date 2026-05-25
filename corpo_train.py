@@ -24,6 +24,30 @@ Tasks 13-16.
 """
 from __future__ import annotations
 
+# Workaround for TRL 0.24's vllm_ascend import bug on CUDA — must run before
+# ANY trl import. run_training imports `from trl import GRPOConfig` before
+# corpo_trainer is loaded, so the stub in corpo_trainer.py alone isn't enough.
+# Keep this in sync with corpo_trainer.py's identical block.
+import sys as _sys
+import types as _types
+if "vllm_ascend" not in _sys.modules:
+    _stub = _types.ModuleType("vllm_ascend")
+    _stub.distributed = _types.ModuleType("vllm_ascend.distributed")
+    _stub.distributed.device_communicators = _types.ModuleType(
+        "vllm_ascend.distributed.device_communicators"
+    )
+    _pyhccl = _types.ModuleType(
+        "vllm_ascend.distributed.device_communicators.pyhccl"
+    )
+    _pyhccl.PyHcclCommunicator = type("PyHcclCommunicator", (), {})
+    _stub.distributed.device_communicators.pyhccl = _pyhccl
+    _sys.modules["vllm_ascend"] = _stub
+    _sys.modules["vllm_ascend.distributed"] = _stub.distributed
+    _sys.modules["vllm_ascend.distributed.device_communicators"] = (
+        _stub.distributed.device_communicators
+    )
+    _sys.modules["vllm_ascend.distributed.device_communicators.pyhccl"] = _pyhccl
+
 import argparse
 import sys
 from pathlib import Path
