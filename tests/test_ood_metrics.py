@@ -292,8 +292,10 @@ class TestBootstrapWinrateCi:
 
 
 class TestDeepSeekV4FlashJudge:
-    def test_returns_a_when_model_says_a(self, sample_diff):
-        with patch("ood_metrics._get_deepseek_client") as get_client:
+    def test_returns_a_when_no_swap_and_model_says_a(self, sample_diff):
+        """random < 0.5 → no swap; model says 'A' → return 'A' unchanged."""
+        with patch("ood_metrics.random.random", return_value=0.4), \
+             patch("ood_metrics._get_deepseek_client") as get_client:
             mock = MagicMock()
             mock.chat.completions.create.return_value.choices = [
                 MagicMock(message=MagicMock(content="A"))
@@ -306,7 +308,25 @@ class TestDeepSeekV4FlashJudge:
                 diff=sample_diff,
                 reference="ref",
             )
-            assert verdict in ("A", "B")  # may be swapped internally
+            assert verdict == "A"
+
+    def test_returns_b_when_swap_and_model_says_a(self, sample_diff):
+        """random > 0.5 → swap (B becomes A internally); model says 'A' → flip back to 'B'."""
+        with patch("ood_metrics.random.random", return_value=0.6), \
+             patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="A"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4flash_pairwise_judge
+            verdict = deepseek_v4flash_pairwise_judge(
+                review_a="good review",
+                review_b="bad review",
+                diff=sample_diff,
+                reference="ref",
+            )
+            assert verdict == "B"
 
     def test_returns_tie_on_garbage(self, sample_diff):
         with patch("ood_metrics._get_deepseek_client") as get_client:
