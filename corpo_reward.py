@@ -70,3 +70,39 @@ def pairwise_score(
     if verdict == "B":
         return 0.0
     return 0.5  # TIE
+
+PAIRWISE_WEIGHT = 0.6
+HALLUC_WEIGHT = 0.3
+LENGTH_WEIGHT = 0.1
+
+
+def composite_reward(
+    diff: str,
+    rollout: str,
+    base_sample: str,
+    reference: str,
+) -> float:
+    """Composite reward in [0, 1] for CoRPO training.
+
+    R = PAIRWISE_WEIGHT * pairwise_score
+      + HALLUC_WEIGHT   * hallucination_score
+      + LENGTH_WEIGHT   * length_sanity_score
+
+    With current weights (0.6, 0.3, 0.1), R = 1.0 iff:
+      - rollout beats base in pairwise (pairwise = 1.0)
+      - no hallucinated identifiers (halluc = 1.0)
+      - length in [200, 4000] (length = 1.0)
+
+    R_min_correct = 0.5 in the CoRPO trainer config: a rollout that wins
+    pairwise (0.6) clears the bar even if length/halluc are zero, but a
+    rollout that only has clean output without winning pairwise (0.3+0.1=0.4)
+    does not.
+    """
+    r_pair = pairwise_score(diff, rollout, base_sample, reference)
+    r_halluc = hallucination_score(diff, rollout)
+    r_length = length_sanity_score(rollout)
+    return (
+        PAIRWISE_WEIGHT * r_pair
+        + HALLUC_WEIGHT * r_halluc
+        + LENGTH_WEIGHT * r_length
+    )

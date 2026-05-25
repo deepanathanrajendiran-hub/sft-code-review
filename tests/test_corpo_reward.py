@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from corpo_reward import hallucination_score, length_sanity_score, pairwise_score
+from corpo_reward import hallucination_score, length_sanity_score, pairwise_score, composite_reward
 
 
 class TestLengthSanity:
@@ -95,3 +95,36 @@ class TestPairwiseScore:
             assert args.args[1] == "BASE_Y"
             assert args.args[2] == sample_diff
             assert args.args[3] == "REF"
+
+class TestCompositeReward:
+    def test_perfect_rollout_scores_one(self, sample_diff):
+        """Wins pairwise + no halluc + length OK -> R = 0.6 + 0.3 + 0.1 = 1.0."""
+        with patch("corpo_reward._judge_fn", return_value="A"):
+            r = composite_reward(
+                diff=sample_diff,
+                rollout="x" * 1000,  # length OK; no identifiers -> no halluc
+                base_sample="base",
+                reference="ref",
+            )
+            assert r == pytest.approx(1.0)
+
+    def test_total_loss_scores_above_zero_due_to_unhalluc(self, sample_diff):
+        """Lose pairwise (0) + no halluc (1.0) + bad length (0) -> 0*0.6 + 1*0.3 + 0*0.1 = 0.3."""
+        with patch("corpo_reward._judge_fn", return_value="B"):
+            r = composite_reward(sample_diff, "", "base", "ref")
+            assert r == pytest.approx(0.3)
+
+    def test_tie_with_clean_review_correct_weighting(self, sample_diff):
+        """Tie pairwise (0.5) + no halluc (1.0) + length OK (1.0) -> 0.5*0.6 + 1*0.3 + 1*0.1 = 0.7."""
+        with patch("corpo_reward._judge_fn", return_value="TIE"):
+            r = composite_reward(sample_diff, "x" * 1000, "base", "ref")
+            assert r == pytest.approx(0.7)
+
+    def test_returns_value_in_unit_interval(self, sample_diff):
+        """Output always in [0.0, 1.0]."""
+        with patch("corpo_reward._judge_fn", return_value="A"):
+            r = composite_reward(sample_diff, "x" * 100, "base", "ref")
+            assert 0.0 <= r <= 1.0
+        with patch("corpo_reward._judge_fn", return_value="B"):
+            r = composite_reward(sample_diff, "x" * 12000, "base", "ref")
+            assert 0.0 <= r <= 1.0
