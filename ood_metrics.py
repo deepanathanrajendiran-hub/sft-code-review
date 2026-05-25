@@ -5,6 +5,7 @@ Pure-Python; no GPU required. Importable from notebooks or callable as CLI.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -401,6 +402,70 @@ def _get_judge_client():
                 import anthropic
                 _judge_client = anthropic.AnthropicBedrock(aws_region="us-west-2")
     return _judge_client
+
+DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+DEEPSEEK_V4_PRO = "deepseek-v4-pro"
+
+_deepseek_client = None
+_deepseek_client_lock = threading.Lock()
+
+
+def _get_deepseek_client():
+    """Return cached OpenAI-compatible client pointed at DeepSeek API."""
+    global _deepseek_client
+    if _deepseek_client is None:
+        with _deepseek_client_lock:
+            if _deepseek_client is None:
+                import openai
+                api_key = os.environ.get("DEEPSEEK_API_KEY")
+                if not api_key:
+                    raise RuntimeError(
+                        "DEEPSEEK_API_KEY env var required for DeepSeek judge"
+                    )
+                _deepseek_client = openai.OpenAI(
+                    api_key=api_key,
+                    base_url="https://api.deepseek.com",
+                )
+    return _deepseek_client
+
+
+def deepseek_v4flash_pairwise_judge(
+    review_a: str, review_b: str, diff: str, reference: str
+) -> str:
+    """One call. Randomized A/B order. Returns 'A', 'B', or 'TIE'.
+
+    Mirrors haiku_pairwise_judge() prompt + truncations for protocol parity.
+    """
+    swap = random.random() > 0.5
+    ra, rb = (review_b, review_a) if swap else (review_a, review_b)
+
+    client = _get_deepseek_client()
+    resp = client.chat.completions.create(
+        model=DEEPSEEK_V4_FLASH,
+        max_tokens=4,
+        messages=[{"role": "user", "content": (
+            "Compare two code reviews for the same diff. Which is better?\n\n"
+            f"DIFF:\n{diff[:2000]}\n\n"
+            f"REFERENCE (expert review):\n{reference[:500]}\n\n"
+            f"REVIEW A:\n{ra[:500]}\n\n"
+            f"REVIEW B:\n{rb[:500]}\n\n"
+            "Criteria: accuracy, actionability, specificity, relevance.\n"
+            "Reply ONLY: A, B, or TIE"
+        )}],
+    )
+    result = resp.choices[0].message.content.strip().upper()
+    if "TIE" in result:
+        result = "TIE"
+    elif "A" in result and "B" not in result:
+        result = "A"
+    elif "B" in result and "A" not in result:
+        result = "B"
+    else:
+        result = "TIE"
+    if swap:
+        if result == "A": result = "B"
+        elif result == "B": result = "A"
+    return result
 
 
 

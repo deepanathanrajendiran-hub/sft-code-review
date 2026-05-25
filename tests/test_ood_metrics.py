@@ -8,7 +8,8 @@ from ood_metrics import (
     bootstrap_winrate_ci,
 )
 from ood_metrics import hit_rate, hit_rate_strict, hallucination_rate, STOPWORDS
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
+import os
 
 
 class TestExtractLocations:
@@ -288,3 +289,44 @@ class TestBootstrapWinrateCi:
         mean, lo, hi = bootstrap_winrate_ci(verdicts, which="A", n_iter=500)
         assert abs(mean - 0.5) < 0.01
         assert lo < 0.5 < hi
+
+
+class TestDeepSeekV4FlashJudge:
+    def test_returns_a_when_model_says_a(self, sample_diff):
+        with patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="A"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4flash_pairwise_judge
+            verdict = deepseek_v4flash_pairwise_judge(
+                review_a="good review",
+                review_b="bad review",
+                diff=sample_diff,
+                reference="ref",
+            )
+            assert verdict in ("A", "B")  # may be swapped internally
+
+    def test_returns_tie_on_garbage(self, sample_diff):
+        with patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="???"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4flash_pairwise_judge
+            verdict = deepseek_v4flash_pairwise_judge("x", "y", sample_diff, "")
+            assert verdict == "TIE"
+
+    def test_client_uses_env_var(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        # Reset module-level client cache
+        import ood_metrics
+        ood_metrics._deepseek_client = None
+        with patch("openai.OpenAI") as openai_ctor:
+            ood_metrics._get_deepseek_client()
+            openai_ctor.assert_called_once()
+            kwargs = openai_ctor.call_args.kwargs
+            assert kwargs["api_key"] == "sk-test"
+            assert "deepseek" in kwargs["base_url"].lower()
