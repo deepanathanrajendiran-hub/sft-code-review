@@ -107,3 +107,25 @@ class TestVarianceGate:
         from corpo_train import _check_variance_gate
         with pytest.raises(ValueError, match="expected 2D"):
             _check_variance_gate(np.zeros(40), threshold=0.10)
+
+class TestResumeFlag:
+    def test_resume_path_passed_through(self):
+        args = parse_args([
+            "--v4-adapter", "/v4",
+            "--v4-backup", "/bkup",
+            "--train-prompts", "p.jsonl",
+            "--base-cache", "b.jsonl",
+            "--output-dir", "/o",
+            "--resume", "/o/checkpoints/step_100",
+        ])
+        assert args.resume == "/o/checkpoints/step_100"
+
+    def test_no_resume_defaults_to_none(self):
+        args = parse_args([
+            "--v4-adapter", "/v4",
+            "--v4-backup", "/bkup",
+            "--train-prompts", "p.jsonl",
+            "--base-cache", "b.jsonl",
+            "--output-dir", "/o",
+        ])
+        assert args.resume is None
