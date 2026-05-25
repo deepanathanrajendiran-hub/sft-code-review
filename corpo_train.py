@@ -237,7 +237,7 @@ def _generate_v4_rollouts(
     num_generations: int,
     max_new_tokens: int,
 ) -> list[list[str]]:
-    """vLLM-generate num_generations rollouts per prompt using base+adapter.
+    """vLLM-generate num_generations rollouts per prompt using base + v4 LoRA via vLLM's LoRA support.
 
     Returns list of length len(prompts), each containing num_generations strings.
     Uses temperature=1.0 (CoRPO paper) for diversity.
@@ -247,6 +247,7 @@ def _generate_v4_rollouts(
     import gc
 
     from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
     from transformers import AutoTokenizer
     from run_ood_eval import _extract_review
 
@@ -266,9 +267,11 @@ def _generate_v4_rollouts(
         ))
 
     llm = LLM(
-        model=adapter_path,
+        model=base_model,
         gpu_memory_utilization=0.85,
         max_model_len=8192,
+        enable_lora=True,
+        max_lora_rank=64,  # v4 uses r=32, alpha=64; max_lora_rank must be >= rank
     )
     sp = SamplingParams(
         temperature=1.0,
@@ -276,7 +279,8 @@ def _generate_v4_rollouts(
         n=num_generations,
         repetition_penalty=1.1,
     )
-    outputs = llm.generate(formatted, sp)
+    lora_request = LoRARequest("v4", 1, adapter_path)
+    outputs = llm.generate(formatted, sp, lora_request=lora_request)
     result: list[list[str]] = []
     for o in outputs:
         rollouts = [_extract_review(comp.text) for comp in o.outputs]
