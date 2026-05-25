@@ -499,7 +499,12 @@ def _get_deepseek_client():
 def _deepseek_pairwise_judge(
     model: str, review_a: str, review_b: str, diff: str, reference: str
 ) -> str:
-    """Shared implementation: one-call binary judge against a DeepSeek model."""
+    """Shared implementation: one-call binary judge against a DeepSeek model.
+
+    Thinking mode disabled — for binary verdicts we don't need the reasoning
+    overhead. Drops per-call latency ~3× vs default. See:
+    https://api-docs.deepseek.com/guides/thinking_mode
+    """
     swap = random.random() > 0.5
     ra, rb = (review_b, review_a) if swap else (review_a, review_b)
     client = _get_deepseek_client()
@@ -507,6 +512,7 @@ def _deepseek_pairwise_judge(
         model=model,
         max_tokens=4,
         messages=[{"role": "user", "content": _build_pairwise_prompt(diff, reference, ra, rb)}],
+        extra_body={"thinking": {"type": "disabled"}},
     )
     return _parse_pairwise_result(resp.choices[0].message.content, swap)
 

@@ -380,6 +380,32 @@ class TestDeepSeekV4ProJudge3Vote:
             assert kwargs["model"] == DEEPSEEK_V4_PRO
 
 
+class TestThinkingDisabled:
+    def test_v4flash_sends_thinking_disabled(self, sample_diff):
+        with patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="A"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4flash_pairwise_judge
+            deepseek_v4flash_pairwise_judge("x", "y", sample_diff, "ref")
+            kwargs = mock.chat.completions.create.call_args.kwargs
+            assert kwargs.get("extra_body") == {"thinking": {"type": "disabled"}}
+
+    def test_v4pro_sends_thinking_disabled(self, sample_diff):
+        with patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="A"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4pro_pairwise_judge
+            deepseek_v4pro_pairwise_judge("x", "y", sample_diff, "ref")
+            kwargs = mock.chat.completions.create.call_args.kwargs
+            assert kwargs.get("extra_body") == {"thinking": {"type": "disabled"}}
+
+
 class TestJudgeSelectionFlag:
     def test_judge_arg_defaults_to_v4pro3vote(self):
         from ood_metrics import _resolve_judge_fn
