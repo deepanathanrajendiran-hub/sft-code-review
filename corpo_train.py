@@ -280,7 +280,9 @@ def _generate_v4_rollouts(
         temperature=1.0,
         max_tokens=max_new_tokens,
         n=num_generations,
-        repetition_penalty=1.1,
+        # NOTE: repetition_penalty intentionally omitted (defaults to 1.0).
+        # TRL's GRPOTrainer also uses 1.0 during training, so the variance gate
+        # must match training sampling exactly to be a faithful pre-flight check.
     )
     lora_request = LoRARequest("v4", 1, adapter_path)
     outputs = llm.generate(formatted, sp, lora_request=lora_request)
