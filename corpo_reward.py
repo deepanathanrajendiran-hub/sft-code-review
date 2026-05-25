@@ -105,6 +105,10 @@ def composite_reward(
     """
     r_pair = pairwise_score(diff, rollout, base_sample, reference)
     r_halluc = hallucination_score(diff, rollout)
+    # NOTE: length is scored on the full rollout (think + review), NOT on extracted review.
+    # The 200-4000 char band reflects typical review-only sizing; well-formed v4-style
+    # outputs with think blocks may exceed it. If reward is consistently capped at
+    # zero from length, either bump the upper bound here or apply _extract_review first.
     r_length = length_sanity_score(rollout)
     return (
         PAIRWISE_WEIGHT * r_pair
