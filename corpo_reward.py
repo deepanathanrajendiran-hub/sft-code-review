@@ -11,6 +11,7 @@ This module is built incrementally:
   Task 11 — BaseSampleCache + --build-base-cache CLI
 """
 from __future__ import annotations
+from ood_metrics import hallucination_rate as _ood_hallucination_rate
 
 
 def length_sanity_score(text: str) -> float:
@@ -28,3 +29,17 @@ def length_sanity_score(text: str) -> float:
         return max(0.0, n / 200)
     # n > 4000
     return max(0.0, 1.0 - (n - 4000) / 4000)
+
+def hallucination_score(diff: str, review_text: str) -> float:
+    """Score in [0, 1] = 1.0 - hallucination_rate.
+
+    Wraps ood_metrics.hallucination_rate which counts backticked identifiers
+    in the review that don't appear in the diff (and aren't on the STOPWORDS
+    allow-list). Higher score = fewer hallucinations.
+
+    Returns 1.0 if no backticked identifiers to check (or all are grounded).
+    """
+    # ood_metrics.hallucination_rate takes a dict with 'diff' and 'v4_pred'
+    pred = {"diff": diff, "v4_pred": review_text}
+    rate = _ood_hallucination_rate(pred)
+    return max(0.0, 1.0 - rate)
