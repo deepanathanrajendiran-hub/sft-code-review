@@ -55,3 +55,13 @@ class TestExtractReview:
 
     def test_empty_string(self):
         assert _extract_review("") == ""
+
+
+def test_skip_base_flag_in_argparser():
+    """run_ood_eval.py exposes --skip-base flag."""
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "run_ood_eval.py", "--help"],
+        capture_output=True, text=True, cwd="/Users/deeps/Documents/SFT"
+    )
+    assert "--skip-base" in result.stdout, f"--skip-base missing from help; got:\n{result.stdout}"
