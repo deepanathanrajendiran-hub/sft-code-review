@@ -385,6 +385,48 @@ def _groupby_avg(preds, labels_by_instance, metric_fn, key_field) -> dict[str, f
     return {k: sum(v) / len(v) for k, v in groups.items()}
 
 
+# ---- pairwise helpers (shared across judge models) ----
+
+
+def _build_pairwise_prompt(diff: str, reference: str, ra: str, rb: str) -> str:
+    """The exact prompt text used by every pairwise judge in this module.
+
+    Truncations: diff[:2000], reference[:500], ra[:500], rb[:500].
+    """
+    return (
+        "Compare two code reviews for the same diff. Which is better?\n\n"
+        f"DIFF:\n{diff[:2000]}\n\n"
+        f"REFERENCE (expert review):\n{reference[:500]}\n\n"
+        f"REVIEW A:\n{ra[:500]}\n\n"
+        f"REVIEW B:\n{rb[:500]}\n\n"
+        "Criteria: accuracy, actionability, specificity, relevance.\n"
+        "Reply ONLY: A, B, or TIE"
+    )
+
+
+def _parse_pairwise_result(raw: str, swap: bool) -> str:
+    """Parse judge model output to 'A'/'B'/'TIE', undoing the A/B swap.
+
+    swap=True means the call was made with sides swapped, so an "A" output
+    actually refers to what the caller passed as B.
+    """
+    result = raw.strip().upper()
+    if "TIE" in result:
+        result = "TIE"
+    elif "A" in result and "B" not in result:
+        result = "A"
+    elif "B" in result and "A" not in result:
+        result = "B"
+    else:
+        result = "TIE"
+    if swap:
+        if result == "A":
+            result = "B"
+        elif result == "B":
+            result = "A"
+    return result
+
+
 # ---- pairwise (Haiku 3-vote majority — production judge, matches eval.ipynb Cell 6) ----
 
 HAIKU_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
@@ -412,29 +454,9 @@ def haiku_pairwise_judge(review_a: str, review_b: str, diff: str, reference: str
     resp = _get_judge_client().messages.create(
         model=HAIKU_MODEL,
         max_tokens=4,
-        messages=[{"role": "user", "content": (
-            "Compare two code reviews for the same diff. Which is better?\n\n"
-            f"DIFF:\n{diff[:2000]}\n\n"
-            f"REFERENCE (expert review):\n{reference[:500]}\n\n"
-            f"REVIEW A:\n{ra[:500]}\n\n"
-            f"REVIEW B:\n{rb[:500]}\n\n"
-            "Criteria: accuracy, actionability, specificity, relevance.\n"
-            "Reply ONLY: A, B, or TIE"
-        )}],
+        messages=[{"role": "user", "content": _build_pairwise_prompt(diff, reference, ra, rb)}],
     )
-    result = resp.content[0].text.strip().upper()
-    if "TIE" in result:
-        result = "TIE"
-    elif "A" in result and "B" not in result:
-        result = "A"
-    elif "B" in result and "A" not in result:
-        result = "B"
-    else:
-        result = "TIE"
-    if swap:
-        if result == "A": result = "B"
-        elif result == "B": result = "A"
-    return result
+    return _parse_pairwise_result(resp.content[0].text, swap)
 
 
 def haiku_pairwise_judge_3vote(review_a: str, review_b: str, diff: str, reference: str) -> str:
@@ -486,29 +508,9 @@ def deepseek_v4flash_pairwise_judge(
     resp = client.chat.completions.create(
         model=DEEPSEEK_V4_FLASH,
         max_tokens=4,
-        messages=[{"role": "user", "content": (
-            "Compare two code reviews for the same diff. Which is better?\n\n"
-            f"DIFF:\n{diff[:2000]}\n\n"
-            f"REFERENCE (expert review):\n{reference[:500]}\n\n"
-            f"REVIEW A:\n{ra[:500]}\n\n"
-            f"REVIEW B:\n{rb[:500]}\n\n"
-            "Criteria: accuracy, actionability, specificity, relevance.\n"
-            "Reply ONLY: A, B, or TIE"
-        )}],
+        messages=[{"role": "user", "content": _build_pairwise_prompt(diff, reference, ra, rb)}],
     )
-    result = resp.choices[0].message.content.strip().upper()
-    if "TIE" in result:
-        result = "TIE"
-    elif "A" in result and "B" not in result:
-        result = "A"
-    elif "B" in result and "A" not in result:
-        result = "B"
-    else:
-        result = "TIE"
-    if swap:
-        if result == "A": result = "B"
-        elif result == "B": result = "A"
-    return result
+    return _parse_pairwise_result(resp.choices[0].message.content, swap)
 
 
 def bootstrap_winrate_ci(verdicts: list[str], which: str = "A", n_iter: int = 2000, ci: int = 95) -> tuple[float, float, float]:
