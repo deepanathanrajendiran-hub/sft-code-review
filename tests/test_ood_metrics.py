@@ -350,3 +350,31 @@ class TestDeepSeekV4FlashJudge:
             kwargs = openai_ctor.call_args.kwargs
             assert kwargs["api_key"] == "sk-test"
             assert "deepseek" in kwargs["base_url"].lower()
+
+
+class TestDeepSeekV4ProJudge3Vote:
+    def test_majority_a(self, sample_diff):
+        with patch("ood_metrics.deepseek_v4pro_pairwise_judge") as one_vote:
+            one_vote.side_effect = ["A", "A", "B"]
+            from ood_metrics import deepseek_v4pro_pairwise_judge_3vote
+            verdict = deepseek_v4pro_pairwise_judge_3vote("x", "y", sample_diff, "ref")
+            assert verdict == "A"
+
+    def test_no_majority_returns_tie(self, sample_diff):
+        with patch("ood_metrics.deepseek_v4pro_pairwise_judge") as one_vote:
+            one_vote.side_effect = ["A", "B", "TIE"]
+            from ood_metrics import deepseek_v4pro_pairwise_judge_3vote
+            verdict = deepseek_v4pro_pairwise_judge_3vote("x", "y", sample_diff, "ref")
+            assert verdict == "TIE"
+
+    def test_single_call_uses_v4pro_model(self, sample_diff):
+        with patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="A"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4pro_pairwise_judge, DEEPSEEK_V4_PRO
+            deepseek_v4pro_pairwise_judge("x", "y", sample_diff, "ref")
+            kwargs = mock.chat.completions.create.call_args.kwargs
+            assert kwargs["model"] == DEEPSEEK_V4_PRO

@@ -470,6 +470,7 @@ def haiku_pairwise_judge_3vote(review_a: str, review_b: str, diff: str, referenc
 # ---- pairwise (DeepSeek V4-Flash binary judge — for CoRPO training only) ----
 
 DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+DEEPSEEK_V4_PRO = "deepseek-v4-pro"
 
 _deepseek_client = None
 _deepseek_client_lock = threading.Lock()
@@ -511,6 +512,37 @@ def deepseek_v4flash_pairwise_judge(
         messages=[{"role": "user", "content": _build_pairwise_prompt(diff, reference, ra, rb)}],
     )
     return _parse_pairwise_result(resp.choices[0].message.content, swap)
+
+
+def deepseek_v4pro_pairwise_judge(
+    review_a: str, review_b: str, diff: str, reference: str
+) -> str:
+    """One call against V4-Pro (higher quality, slower). Returns 'A', 'B', or 'TIE'.
+
+    Used by eval (not training); training uses the cheaper V4-Flash judge.
+    """
+    swap = random.random() > 0.5
+    ra, rb = (review_b, review_a) if swap else (review_a, review_b)
+    client = _get_deepseek_client()
+    resp = client.chat.completions.create(
+        model=DEEPSEEK_V4_PRO,
+        max_tokens=4,
+        messages=[{"role": "user", "content": _build_pairwise_prompt(diff, reference, ra, rb)}],
+    )
+    return _parse_pairwise_result(resp.choices[0].message.content, swap)
+
+
+def deepseek_v4pro_pairwise_judge_3vote(
+    review_a: str, review_b: str, diff: str, reference: str
+) -> str:
+    """3-vote majority. Returns 'A', 'B', or 'TIE' (TIE if no >=2 majority)."""
+    votes = [
+        deepseek_v4pro_pairwise_judge(review_a, review_b, diff, reference)
+        for _ in range(3)
+    ]
+    c = Counter(votes)
+    top_label, top_count = c.most_common(1)[0]
+    return top_label if top_count >= 2 else "TIE"
 
 
 def bootstrap_winrate_ci(verdicts: list[str], which: str = "A", n_iter: int = 2000, ci: int = 95) -> tuple[float, float, float]:
