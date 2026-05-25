@@ -467,7 +467,7 @@ def haiku_pairwise_judge_3vote(review_a: str, review_b: str, diff: str, referenc
     return top_label if top_count >= 2 else "TIE"
 
 
-# ---- pairwise (DeepSeek V4-Flash binary judge — for CoRPO training only) ----
+# ---- pairwise (DeepSeek V4-Flash + V4-Pro) ----
 
 DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
 DEEPSEEK_V4_PRO = "deepseek-v4-pro"
@@ -558,20 +558,26 @@ def bootstrap_winrate_ci(verdicts: list[str], which: str = "A", n_iter: int = 20
     return float(indicator.mean()), lo, hi
 
 
+_JUDGES = {
+    "v4pro3vote": deepseek_v4pro_pairwise_judge_3vote,
+    "v4flash": deepseek_v4flash_pairwise_judge,
+    "haiku": haiku_pairwise_judge_3vote,
+}
+
 def _resolve_judge_fn(name: str):
     """Map a --judge flag value to the corresponding judge function."""
-    if name == "v4pro3vote":
-        return deepseek_v4pro_pairwise_judge_3vote
-    if name == "v4flash":
-        return deepseek_v4flash_pairwise_judge
-    if name == "haiku":
-        return haiku_pairwise_judge_3vote
-    raise ValueError(f"unknown judge: {name!r} (expected: v4pro3vote, v4flash, haiku)")
+    try:
+        return _JUDGES[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown judge: {name!r} (expected: {', '.join(_JUDGES)})"
+        ) from None
+
 
 def pairwise_win(
     preds: list[dict],
     api_key: str = "",  # ignored; AnthropicBedrock uses AWS credentials
-    n_votes: int = 3,  # ignored; haiku_pairwise_judge_3vote hardcodes 3
+    n_votes: int = 3,  # ignored; vote count is baked into judge_fn (V4-Flash: 1, V4-Pro/Haiku: 3)
     max_workers: int = 16,
     judge_fn=None,
 ) -> dict:
@@ -649,7 +655,7 @@ def main():
     )
     ap.add_argument(
         "--judge",
-        choices=["v4pro3vote", "v4flash", "haiku"],
+        choices=list(_JUDGES),
         default="v4pro3vote",
         help="Pairwise judge family: v4pro3vote (default), v4flash (cheap binary), haiku (Bedrock cross-check)",
     )
