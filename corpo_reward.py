@@ -12,7 +12,7 @@ This module is built incrementally:
 """
 from __future__ import annotations
 from ood_metrics import hallucination_rate as _ood_hallucination_rate
-from ood_metrics import deepseek_v4flash_pairwise_judge
+from ood_metrics import deepseek_v4pro_pairwise_judge
 import argparse
 import json
 import sys
@@ -52,8 +52,10 @@ def hallucination_score(diff: str, review_text: str) -> float:
 
 
 # Module-level binding so tests can patch _judge_fn
-# (Production: V4-Flash binary judge; tests: MagicMock)
-_judge_fn = deepseek_v4flash_pairwise_judge
+# (Production: V4-Pro binary judge — V4-Flash was too conservative, calling TIE on >95%
+# of v4-vs-base comparisons during the variance gate. V4-Pro discriminates better at
+# ~3× cost which is still negligible.)
+_judge_fn = deepseek_v4pro_pairwise_judge
 
 
 def pairwise_score(
@@ -62,12 +64,16 @@ def pairwise_score(
     base_sample: str,
     reference: str,
 ) -> float:
-    """Binary pairwise reward via DeepSeek V4-Flash judge.
+    """Binary pairwise reward via DeepSeek V4-Pro judge.
 
     Returns:
         1.0 if rollout beats base_sample (judge says A)
         0.0 if rollout loses (judge says B)
         0.5 if TIE
+
+    Switched from V4-Flash on 2026-05-25 — variance gate showed V4-Flash
+    called TIE on >95% of v4-vs-base comparisons (std=0.054 vs threshold 0.10).
+    V4-Pro is more decisive at ~$12/epoch (was ~$3.60 for V4-Flash).
     """
     verdict = _judge_fn(rollout, base_sample, diff, reference)
     if verdict == "A":
