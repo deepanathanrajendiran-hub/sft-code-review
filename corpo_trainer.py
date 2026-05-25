@@ -34,6 +34,16 @@ class CoRPOTrainer(GRPOTrainer):
     """GRPOTrainer with baseline-clipping (CoRPO) advantage computation."""
 
     def __init__(self, *args, r_min_correct: float = 0.0, **kwargs):
+        """Initialize CoRPOTrainer.
+
+        Args:
+            r_min_correct: Correctness threshold from CoRPO Eq. 11. Rollouts
+                with reward below this value cannot receive positive advantage,
+                even when the group mean is also below it. Typical range: 0.0
+                (binary rewards centered at 0) to 0.5 (composite rewards in
+                [0, 1] where 0.5 = "must beat the median of perfect-vs-junk").
+            All other args/kwargs are forwarded to GRPOTrainer.__init__.
+        """
         super().__init__(*args, **kwargs)
         self.r_min_correct = r_min_correct
         self._last_raw_rewards: torch.Tensor | None = None
@@ -45,6 +55,58 @@ class CoRPOTrainer(GRPOTrainer):
                 f"(got {scale!r}). std-normalization would break the CoRPO "
                 f"baseline correction."
             )
+
+    def _calculate_rewards(self, inputs, prompts, completions, completion_ids_list):
+        """Capture raw rewards for the post-process step.
+
+        Note: TRL gathers across processes before returning, so the captured
+        tensor has shape (global_B * G, num_reward_funcs), not local. The
+        slicing in _generate_and_score_completions accounts for this.
+        """
+        rewards_per_func = super()._calculate_rewards(
+            inputs, prompts, completions, completion_ids_list
+        )
+        self._last_raw_rewards = rewards_per_func.detach().clone()
+        return rewards_per_func
+
+    def _generate_and_score_completions(self, inputs):
+        """Run super, then replace GRPO advantages with CoRPO advantages."""
+        try:
+            output = super()._generate_and_score_completions(inputs)
+            captured = self._last_raw_rewards
+        finally:
+            self._last_raw_rewards = None
+
+        if captured is None:
+            raise RuntimeError(
+                "CoRPOTrainer expected _calculate_rewards to populate "
+                "_last_raw_rewards before _generate_and_score_completions, "
+                "but it didn't. Has TRL's GRPOTrainer been updated in a way "
+                "that skips _calculate_rewards? This subclass would silently "
+                "produce GRPO advantages — refusing to continue."
+            )
+
+        # Aggregate per-func rewards with weights (mirrors TRL grpo_trainer.py
+        # weighted reward aggregation, ~line 1486 in TRL 0.12-0.19).
+        rewards_per_func = captured
+        weights = self.reward_weights.to(self.accelerator.device)
+        rewards = (rewards_per_func * weights.unsqueeze(0)).nansum(dim=1)
+
+        # Recompute CoRPO advantages on the full (pre-slice) batch
+        new_advantages_full = self._compute_corpo_advantages(rewards)
+
+        # output["advantages"] is sliced for this process. For single-GPU
+        # (process_index=0) the slice is the whole tensor; for multi-GPU,
+        # TRL's process_slice logic uses contiguous shards.
+        per_process_size = len(output["advantages"])
+        process_index = getattr(self.accelerator, "process_index", 0)
+        start = process_index * per_process_size
+        end = start + per_process_size
+        output["advantages"] = new_advantages_full[start:end].to(
+            output["advantages"].device
+        )
+
+        return output
 
     def _compute_corpo_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
         """Compute CoRPO advantages from grouped per-rollout rewards.
@@ -63,41 +125,3 @@ class CoRPOTrainer(GRPOTrainer):
         baseline = torch.clamp(group_means, min=self.r_min_correct)
         advantages = rewards_grouped - baseline
         return advantages.view(-1)
-
-    def _calculate_rewards(self, inputs, prompts, completions, completion_ids_list):
-        """Capture raw rewards for the post-process step."""
-        rewards_per_func = super()._calculate_rewards(
-            inputs, prompts, completions, completion_ids_list
-        )
-        self._last_raw_rewards = rewards_per_func.detach().clone()
-        return rewards_per_func
-
-    def _generate_and_score_completions(self, inputs):
-        """Run super, then replace GRPO advantages with CoRPO advantages."""
-        output = super()._generate_and_score_completions(inputs)
-
-        if self._last_raw_rewards is None:
-            # Defensive: shouldn't happen since super() invokes _calculate_rewards
-            return output
-
-        # Aggregate per-func rewards with weights (mirrors TRL's sum_then_normalize)
-        rewards_per_func = self._last_raw_rewards
-        weights = self.reward_weights.to(rewards_per_func.device)
-        rewards = (rewards_per_func * weights.unsqueeze(0)).nansum(dim=1)
-
-        # Recompute CoRPO advantages on the full (pre-slice) batch
-        new_advantages_full = self._compute_corpo_advantages(rewards)
-
-        # output["advantages"] is sliced for this process. For single-GPU
-        # (process_index=0) the slice is the whole tensor; for multi-GPU,
-        # we'd need TRL's process_slice logic.
-        per_process_size = len(output["advantages"])
-        process_index = getattr(self.accelerator, "process_index", 0)
-        start = process_index * per_process_size
-        end = start + per_process_size
-        output["advantages"] = new_advantages_full[start:end].to(
-            output["advantages"].device
-        )
-
-        self._last_raw_rewards = None  # reset for next call
-        return output
