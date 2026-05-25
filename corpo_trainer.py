@@ -26,30 +26,17 @@ Constraints:
 """
 from __future__ import annotations
 
-# Workaround for TRL 0.24's vllm_ascend import bug on CUDA-only systems.
-# `trl/extras/vllm_client.py` unconditionally imports vllm_ascend.distributed
-# even when is_vllm_ascend_available() should return False. Stub the module
-# so the import succeeds; the stub is never exercised because we run on CUDA.
-# Remove this block when TRL fixes the conditional import upstream.
-import sys as _sys
-import types as _types
-if "vllm_ascend" not in _sys.modules:
-    _stub = _types.ModuleType("vllm_ascend")
-    _stub.distributed = _types.ModuleType("vllm_ascend.distributed")
-    _stub.distributed.device_communicators = _types.ModuleType(
-        "vllm_ascend.distributed.device_communicators"
-    )
-    _pyhccl = _types.ModuleType(
-        "vllm_ascend.distributed.device_communicators.pyhccl"
-    )
-    _pyhccl.PyHcclCommunicator = type("PyHcclCommunicator", (), {})
-    _stub.distributed.device_communicators.pyhccl = _pyhccl
-    _sys.modules["vllm_ascend"] = _stub
-    _sys.modules["vllm_ascend.distributed"] = _stub.distributed
-    _sys.modules["vllm_ascend.distributed.device_communicators"] = (
-        _stub.distributed.device_communicators
-    )
-    _sys.modules["vllm_ascend.distributed.device_communicators.pyhccl"] = _pyhccl
+# Workaround for TRL 0.24's vllm_ascend probe on standard CUDA Colab. See
+# corpo_train.py for the full explanation. Identical patch kept here so
+# `import corpo_trainer` works as a direct entry point.
+import transformers.utils.import_utils as _tu_iu
+_real_is_pkg = _tu_iu._is_package_available
+def _patched_is_pkg(pkg_name, return_version=False):
+    if pkg_name == "vllm_ascend":
+        return (False, "N/A") if return_version else False
+    return _real_is_pkg(pkg_name, return_version)
+_tu_iu._is_package_available = _patched_is_pkg
+del _tu_iu, _real_is_pkg, _patched_is_pkg
 
 import torch
 from trl import GRPOTrainer

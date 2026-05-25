@@ -24,29 +24,20 @@ Tasks 13-16.
 """
 from __future__ import annotations
 
-# Workaround for TRL 0.24's vllm_ascend import bug on CUDA — must run before
-# ANY trl import. run_training imports `from trl import GRPOConfig` before
-# corpo_trainer is loaded, so the stub in corpo_trainer.py alone isn't enough.
-# Keep this in sync with corpo_trainer.py's identical block.
-import sys as _sys
-import types as _types
-if "vllm_ascend" not in _sys.modules:
-    _stub = _types.ModuleType("vllm_ascend")
-    _stub.distributed = _types.ModuleType("vllm_ascend.distributed")
-    _stub.distributed.device_communicators = _types.ModuleType(
-        "vllm_ascend.distributed.device_communicators"
-    )
-    _pyhccl = _types.ModuleType(
-        "vllm_ascend.distributed.device_communicators.pyhccl"
-    )
-    _pyhccl.PyHcclCommunicator = type("PyHcclCommunicator", (), {})
-    _stub.distributed.device_communicators.pyhccl = _pyhccl
-    _sys.modules["vllm_ascend"] = _stub
-    _sys.modules["vllm_ascend.distributed"] = _stub.distributed
-    _sys.modules["vllm_ascend.distributed.device_communicators"] = (
-        _stub.distributed.device_communicators
-    )
-    _sys.modules["vllm_ascend.distributed.device_communicators.pyhccl"] = _pyhccl
+# Workaround for TRL 0.24's vllm_ascend probe on standard CUDA Colab. TRL
+# checks `_is_package_available("vllm_ascend")` at module-load time; on this
+# image the check trips even without vllm_ascend actually installed, then the
+# conditional import explodes. Patch the transformers helper to special-case
+# vllm_ascend as unavailable, BEFORE trl is imported. Must run at the very
+# top of any entry point that ever touches trl.
+import transformers.utils.import_utils as _tu_iu
+_real_is_pkg = _tu_iu._is_package_available
+def _patched_is_pkg(pkg_name, return_version=False):
+    if pkg_name == "vllm_ascend":
+        return (False, "N/A") if return_version else False
+    return _real_is_pkg(pkg_name, return_version)
+_tu_iu._is_package_available = _patched_is_pkg
+del _tu_iu, _real_is_pkg, _patched_is_pkg
 
 import argparse
 import sys
