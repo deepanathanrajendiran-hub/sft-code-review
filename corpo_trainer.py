@@ -19,29 +19,16 @@ Constraints:
 - Requires `scale_rewards="none"` in GRPOConfig — std-normalization would break
   the CoRPO baseline math. The constructor asserts this.
 - Targets `multi_objective_aggregation="sum_then_normalize"` (TRL default).
-- Tested on TRL >=0.12, <0.20. If TRL changes the output dict's "advantages"
-  key or the `_calculate_rewards` signature, this subclass breaks loudly.
+- Targets TRL 0.22.2 (the version pinned by the canonical Unsloth GRPO Colab
+  notebook). Method signatures verified against
+  https://raw.githubusercontent.com/huggingface/trl/v0.22.2/trl/trainer/grpo_trainer.py
+  If TRL changes the output dict's "advantages" key or the `_calculate_rewards`
+  signature, this subclass breaks loudly via the RuntimeError in
+  `_generate_and_score_completions`.
 - Multi-GPU: the post-process slicing assumes single-process; for multi-GPU,
   the process_index slicing needs adjustment.
 """
 from __future__ import annotations
-
-# Workaround for TRL 0.24's vllm_ascend probe on standard CUDA Colab. See
-# corpo_train.py for the full explanation. Identical patch kept here so
-# `import corpo_trainer` works as a direct entry point. No-op if transformers
-# isn't installed (e.g., local test environment).
-try:
-    import transformers.utils.import_utils as _tu_iu
-    _real_is_pkg = _tu_iu._is_package_available
-    def _patched_is_pkg(pkg_name, return_version=False):
-        if pkg_name == "vllm_ascend":
-            return (False, "N/A") if return_version else False
-        return _real_is_pkg(pkg_name, return_version)
-    _tu_iu._is_package_available = _patched_is_pkg
-    # NOTE: do NOT `del` _real_is_pkg — it's a free variable in the closure above.
-    # Python closures bind by name; deleting it breaks the patched function.
-except ImportError:
-    pass
 
 import torch
 from trl import GRPOTrainer
