@@ -78,6 +78,20 @@ class TestVerifyBackup:
         with pytest.raises(ValueError, match="adapter_config.json"):
             verify_v4_backup(str(empty))
 
+    def test_same_path_as_adapter_raises(self, tmp_path):
+        path = tmp_path / "v4"
+        path.mkdir()
+        (path / "adapter_config.json").write_text("{}")
+        with pytest.raises(ValueError, match="DIFFERENT path"):
+            verify_v4_backup(str(path), str(path))
+
+    def test_different_paths_passes(self, tmp_path):
+        backup = tmp_path / "v4-backup"
+        backup.mkdir()
+        (backup / "adapter_config.json").write_text("{}")
+        # adapter doesn't even need to exist — we just check inequality
+        verify_v4_backup(str(backup), str(tmp_path / "different-adapter"))
+
 class TestVarianceGate:
     def test_pass_when_std_above_threshold(self):
         from corpo_train import _check_variance_gate

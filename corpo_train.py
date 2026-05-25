@@ -65,12 +65,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
-def verify_v4_backup(backup_path: str) -> None:
-    """Refuse to proceed unless the v4 backup contains adapter_config.json.
+def verify_v4_backup(backup_path: str, adapter_path: str | None = None) -> None:
+    """Refuse to proceed unless backup exists AND is distinct from the adapter to be trained.
 
-    Prevents mutating the only copy of v4. The CoRPO training continues v4's
-    LoRA weights in-place (per the design); a backup must exist outside the
-    training output directory in case the run fails or produces bad weights.
+    adapter_path defaults to None for backward compat with tests that test
+    backup-only checks; production main() always passes it.
     """
     p = Path(backup_path)
     if not p.exists():
@@ -79,6 +78,10 @@ def verify_v4_backup(backup_path: str) -> None:
         raise ValueError(
             f"v4 backup at {backup_path} is missing adapter_config.json — "
             f"refusing to start training in case this is not actually a LoRA backup"
+        )
+    if adapter_path is not None and Path(backup_path).resolve() == Path(adapter_path).resolve():
+        raise ValueError(
+            f"--v4-backup must be a DIFFERENT path from --v4-adapter; both resolved to {Path(backup_path).resolve()}"
         )
     print(f"[corpo_train] verified v4 backup at {backup_path}", file=sys.stderr)
 
@@ -224,7 +227,7 @@ def run_training(args: argparse.Namespace) -> None:
 
 def main():
     args = parse_args()
-    verify_v4_backup(args.v4_backup)
+    verify_v4_backup(args.v4_backup, args.v4_adapter)
     if args.variance_gate_only:
         passed = run_variance_gate(args)
         sys.exit(0 if passed else 1)
