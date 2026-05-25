@@ -378,3 +378,24 @@ class TestDeepSeekV4ProJudge3Vote:
             deepseek_v4pro_pairwise_judge("x", "y", sample_diff, "ref")
             kwargs = mock.chat.completions.create.call_args.kwargs
             assert kwargs["model"] == DEEPSEEK_V4_PRO
+
+
+class TestJudgeSelectionFlag:
+    def test_judge_arg_defaults_to_v4pro3vote(self):
+        from ood_metrics import _resolve_judge_fn
+        fn = _resolve_judge_fn("v4pro3vote")
+        from ood_metrics import deepseek_v4pro_pairwise_judge_3vote
+        assert fn is deepseek_v4pro_pairwise_judge_3vote
+
+    def test_judge_arg_v4flash(self):
+        from ood_metrics import _resolve_judge_fn, deepseek_v4flash_pairwise_judge
+        assert _resolve_judge_fn("v4flash") is deepseek_v4flash_pairwise_judge
+
+    def test_judge_arg_haiku(self):
+        from ood_metrics import _resolve_judge_fn, haiku_pairwise_judge_3vote
+        assert _resolve_judge_fn("haiku") is haiku_pairwise_judge_3vote
+
+    def test_judge_arg_unknown_raises(self):
+        from ood_metrics import _resolve_judge_fn
+        with pytest.raises(ValueError, match="unknown judge"):
+            _resolve_judge_fn("nonsense")

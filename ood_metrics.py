@@ -558,17 +558,35 @@ def bootstrap_winrate_ci(verdicts: list[str], which: str = "A", n_iter: int = 20
     return float(indicator.mean()), lo, hi
 
 
+def _resolve_judge_fn(name: str):
+    """Map a --judge flag value to the corresponding judge function."""
+    if name == "v4pro3vote":
+        return deepseek_v4pro_pairwise_judge_3vote
+    if name == "v4flash":
+        return deepseek_v4flash_pairwise_judge
+    if name == "haiku":
+        return haiku_pairwise_judge_3vote
+    raise ValueError(f"unknown judge: {name!r} (expected: v4pro3vote, v4flash, haiku)")
+
 def pairwise_win(
     preds: list[dict],
     api_key: str = "",  # ignored; AnthropicBedrock uses AWS credentials
     n_votes: int = 3,  # ignored; haiku_pairwise_judge_3vote hardcodes 3
     max_workers: int = 16,
+    judge_fn=None,
 ) -> dict:
     """3-vote majority pairwise: v4_pred (A) vs base_pred (B) with order swap and
     reference review. Returns aggregate dict including bootstrap 95% CI.
+
+    judge_fn defaults to haiku_pairwise_judge_3vote for backward compat with
+    library callers; CLI callers select a judge via the --judge flag (defaults
+    to v4pro3vote there).
     """
+    if judge_fn is None:
+        judge_fn = haiku_pairwise_judge_3vote
+
     def _vote_one(pred):
-        return haiku_pairwise_judge_3vote(
+        return judge_fn(
             review_a=pred["v4_pred"],
             review_b=pred["base_pred"],
             diff=pred.get("diff", ""),
@@ -629,6 +647,12 @@ def main():
         action="store_true",
         help="Skip dual-scoring base_pred (loses base calibration but slightly faster)",
     )
+    ap.add_argument(
+        "--judge",
+        choices=["v4pro3vote", "v4flash", "haiku"],
+        default="v4pro3vote",
+        help="Pairwise judge family: v4pro3vote (default), v4flash (cheap binary), haiku (Bedrock cross-check)",
+    )
     args = ap.parse_args()
 
     preds = _load_jsonl(args.preds)
@@ -670,7 +694,9 @@ def main():
         results["base"] = _score(preds, "base_pred")
 
     if not args.skip_pairwise:
-        results["pairwise"] = pairwise_win(preds, args.api_key)
+        results["pairwise"] = pairwise_win(
+            preds, args.api_key, judge_fn=_resolve_judge_fn(args.judge)
+        )
 
     Path(args.output).write_text(json.dumps(results, indent=2))
     print(f"[ood_metrics] wrote {args.output}")
