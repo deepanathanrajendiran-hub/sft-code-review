@@ -28,16 +28,19 @@ from __future__ import annotations
 # checks `_is_package_available("vllm_ascend")` at module-load time; on this
 # image the check trips even without vllm_ascend actually installed, then the
 # conditional import explodes. Patch the transformers helper to special-case
-# vllm_ascend as unavailable, BEFORE trl is imported. Must run at the very
-# top of any entry point that ever touches trl.
-import transformers.utils.import_utils as _tu_iu
-_real_is_pkg = _tu_iu._is_package_available
-def _patched_is_pkg(pkg_name, return_version=False):
-    if pkg_name == "vllm_ascend":
-        return (False, "N/A") if return_version else False
-    return _real_is_pkg(pkg_name, return_version)
-_tu_iu._is_package_available = _patched_is_pkg
-del _tu_iu, _real_is_pkg, _patched_is_pkg
+# vllm_ascend as unavailable, BEFORE trl is imported. No-op if transformers
+# isn't installed (e.g., local test environment).
+try:
+    import transformers.utils.import_utils as _tu_iu
+    _real_is_pkg = _tu_iu._is_package_available
+    def _patched_is_pkg(pkg_name, return_version=False):
+        if pkg_name == "vllm_ascend":
+            return (False, "N/A") if return_version else False
+        return _real_is_pkg(pkg_name, return_version)
+    _tu_iu._is_package_available = _patched_is_pkg
+    del _tu_iu, _real_is_pkg, _patched_is_pkg
+except ImportError:
+    pass
 
 import argparse
 import sys

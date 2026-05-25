@@ -28,15 +28,19 @@ from __future__ import annotations
 
 # Workaround for TRL 0.24's vllm_ascend probe on standard CUDA Colab. See
 # corpo_train.py for the full explanation. Identical patch kept here so
-# `import corpo_trainer` works as a direct entry point.
-import transformers.utils.import_utils as _tu_iu
-_real_is_pkg = _tu_iu._is_package_available
-def _patched_is_pkg(pkg_name, return_version=False):
-    if pkg_name == "vllm_ascend":
-        return (False, "N/A") if return_version else False
-    return _real_is_pkg(pkg_name, return_version)
-_tu_iu._is_package_available = _patched_is_pkg
-del _tu_iu, _real_is_pkg, _patched_is_pkg
+# `import corpo_trainer` works as a direct entry point. No-op if transformers
+# isn't installed (e.g., local test environment).
+try:
+    import transformers.utils.import_utils as _tu_iu
+    _real_is_pkg = _tu_iu._is_package_available
+    def _patched_is_pkg(pkg_name, return_version=False):
+        if pkg_name == "vllm_ascend":
+            return (False, "N/A") if return_version else False
+        return _real_is_pkg(pkg_name, return_version)
+    _tu_iu._is_package_available = _patched_is_pkg
+    del _tu_iu, _real_is_pkg, _patched_is_pkg
+except ImportError:
+    pass
 
 import torch
 from trl import GRPOTrainer
