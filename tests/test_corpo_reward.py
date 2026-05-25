@@ -1,9 +1,11 @@
 """Unit tests for corpo_reward.py components."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
-from corpo_reward import hallucination_score, length_sanity_score
+from corpo_reward import hallucination_score, length_sanity_score, pairwise_score
 
 
 class TestLengthSanity:
@@ -55,3 +57,41 @@ class TestHallucinationScore:
         bad_review = "The `foo` and `bar` and `baz_qux` functions are wrong."
         score = hallucination_score(sample_diff, bad_review)
         assert 0.0 <= score <= 1.0
+
+
+class TestPairwiseScore:
+    def test_rollout_wins_returns_one(self, sample_diff):
+        """When judge says rollout (passed as A) wins, score is 1.0."""
+        with patch("corpo_reward._judge_fn") as judge:
+            judge.return_value = "A"
+            score = pairwise_score(
+                diff=sample_diff,
+                rollout="rollout text",
+                base_sample="base text",
+                reference="ref",
+            )
+            assert score == 1.0
+
+    def test_rollout_loses_returns_zero(self, sample_diff):
+        with patch("corpo_reward._judge_fn") as judge:
+            judge.return_value = "B"
+            score = pairwise_score(sample_diff, "rollout", "base", "ref")
+            assert score == 0.0
+
+    def test_tie_returns_half(self, sample_diff):
+        with patch("corpo_reward._judge_fn") as judge:
+            judge.return_value = "TIE"
+            score = pairwise_score(sample_diff, "rollout", "base", "ref")
+            assert score == 0.5
+
+    def test_judge_called_with_rollout_as_a(self, sample_diff):
+        """Verify we pass rollout=A, base=B to the judge (judge handles A/B swap internally)."""
+        with patch("corpo_reward._judge_fn") as judge:
+            judge.return_value = "A"
+            pairwise_score(sample_diff, "ROLLOUT_X", "BASE_Y", "REF")
+            args = judge.call_args
+            # judge signature: (review_a, review_b, diff, reference)
+            assert args.args[0] == "ROLLOUT_X"
+            assert args.args[1] == "BASE_Y"
+            assert args.args[2] == sample_diff
+            assert args.args[3] == "REF"

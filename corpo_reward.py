@@ -12,6 +12,7 @@ This module is built incrementally:
 """
 from __future__ import annotations
 from ood_metrics import hallucination_rate as _ood_hallucination_rate
+from ood_metrics import deepseek_v4flash_pairwise_judge
 
 
 def length_sanity_score(text: str) -> float:
@@ -43,3 +44,29 @@ def hallucination_score(diff: str, review_text: str) -> float:
     pred = {"diff": diff, "v4_pred": review_text}
     rate = _ood_hallucination_rate(pred)
     return max(0.0, 1.0 - rate)
+
+
+# Module-level binding so tests can patch _judge_fn
+# (Production: V4-Flash binary judge; tests: MagicMock)
+_judge_fn = deepseek_v4flash_pairwise_judge
+
+
+def pairwise_score(
+    diff: str,
+    rollout: str,
+    base_sample: str,
+    reference: str,
+) -> float:
+    """Binary pairwise reward via DeepSeek V4-Flash judge.
+
+    Returns:
+        1.0 if rollout beats base_sample (judge says A)
+        0.0 if rollout loses (judge says B)
+        0.5 if TIE
+    """
+    verdict = _judge_fn(rollout, base_sample, diff, reference)
+    if verdict == "A":
+        return 1.0
+    if verdict == "B":
+        return 0.0
+    return 0.5  # TIE
