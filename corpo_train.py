@@ -162,17 +162,40 @@ def run_training(args: argparse.Namespace) -> None:
         "Review the following code diff and provide feedback:\n```diff\n{diff}\n```"
     )
 
+    # Char truncation for the diff. vLLM's max_model_len is 8192 (from FastLanguageModel
+    # max_seq_length=8192). Subtract max_completion_length=2048 → 6144 tokens for the
+    # prompt. Allow ~200 tokens for system+template overhead → ~5900 tokens for the
+    # diff. At a conservative 1.5 chars/token for dense code, that's ~8800 chars.
+    # 12000 chars previously crashed at step 32 (a diff tokenized to 8906 tokens —
+    # ~1.35 chars/token). 5000 chars is the safe ceiling: even at 1.0 chars/token
+    # (worst case) it stays under 5000 tokens, well below the 6144 budget.
+    DIFF_CHAR_LIMIT = 5000
+
+    # Additionally, filter out any prompt that still produces >6000 tokens after
+    # truncation+templating, so a worst-case diff can't crash the run mid-training.
     def _format(p):
         messages = [
             {"role": "system", "content": SYSTEM_MSG},
-            {"role": "user", "content": USER_TEMPLATE.format(diff=p["diff"][:12000])},
+            {"role": "user", "content": USER_TEMPLATE.format(diff=p["diff"][:DIFF_CHAR_LIMIT])},
         ]
         p["prompt"] = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
         return p
 
-    dataset = Dataset.from_list([_format(p) for p in prompts])
+    formatted = [_format(p) for p in prompts]
+    pre_filter = len(formatted)
+    formatted = [
+        p for p in formatted
+        if len(tokenizer.encode(p["prompt"], add_special_tokens=False)) <= 6000
+    ]
+    dropped = pre_filter - len(formatted)
+    if dropped:
+        print(
+            f"[corpo_train] dropped {dropped}/{pre_filter} prompts that exceed 6000 tokens after truncation",
+            file=sys.stderr,
+        )
+    dataset = Dataset.from_list(formatted)
 
     # 4. Reward function — closure captures base_cache
     def reward_fn(prompts: list[str], completions: list[str], **kwargs) -> list[float]:
