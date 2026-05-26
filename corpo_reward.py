@@ -21,20 +21,32 @@ from pathlib import Path
 
 
 def length_sanity_score(text: str) -> float:
-    """Linear-taper reward for output length.
+    """Reward outputs near v4's baseline length (~3500 chars).
 
-    Returns 1.0 if 200 <= len(text) <= 4000 (the typical v4 review band).
-    Linear taper to 0.0 outside on both sides:
-      - below: linear from 0.0 at len=0 to 1.0 at len=200
-      - above: linear from 1.0 at len=4000 to 0.0 at len=8000
+    Previous band was [200, 4000] — too permissive. Run #1 (2026-05-26) showed
+    GRPO/CoRPO collapse outputs to ~750 tokens (~2250 chars) while still
+    scoring 1.0 — classic length-hacking failure mode. The model discovered
+    the cheapest path to maintain reward was to shrink to the band lower edge.
+
+    New shape: 1.0 plateau across [2500, 5000] (v4 baseline ±30%), triangular
+    taper outside:
+      - 0 chars     → 0.0
+      - 750 chars   → 0.30   (length-hacked output gets penalized)
+      - 1750 chars  → 0.70
+      - 2500-5000   → 1.0    (v4 baseline band)
+      - 7500 chars  → 0.50
+      - 10000 chars → 0.0
+
+    This punishes length collapse: a 750-char output now contributes only
+    0.03 to the composite reward (vs 0.10 before), losing 0.07 — a real
+    pressure to maintain v4-like output length.
     """
     n = len(text)
-    if 200 <= n <= 4000:
+    if 2500 <= n <= 5000:
         return 1.0
-    if n < 200:
-        return max(0.0, n / 200)
-    # n > 4000
-    return max(0.0, 1.0 - (n - 4000) / 4000)
+    if n < 2500:
+        return n / 2500
+    return max(0.0, 1.0 - (n - 5000) / 5000)
 
 def hallucination_score(diff: str, review_text: str) -> float:
     """Score in [0, 1] = 1.0 - hallucination_rate.

@@ -18,25 +18,29 @@ from corpo_reward import (
 
 class TestLengthSanity:
     def test_within_band_returns_one(self):
-        assert length_sanity_score("x" * 200) == 1.0
-        assert length_sanity_score("x" * 1000) == 1.0
-        assert length_sanity_score("x" * 4000) == 1.0
+        # Plateau [2500, 5000] anchored on v4's 3500-char mean ±30%
+        assert length_sanity_score("x" * 2500) == 1.0
+        assert length_sanity_score("x" * 3500) == 1.0
+        assert length_sanity_score("x" * 5000) == 1.0
 
     def test_too_short_linear_taper(self):
-        assert length_sanity_score("x" * 100) == 0.5
+        # n=1250: 1250/2500 = 0.5
+        assert length_sanity_score("x" * 1250) == 0.5
+        # n=750: length-hacked output gets ~0.30
+        assert length_sanity_score("x" * 750) == pytest.approx(0.30, rel=0.01)
         assert length_sanity_score("") == 0.0
 
     def test_too_long_linear_taper(self):
-        # n=6000: 1 - (6000-4000)/4000 = 0.5
-        assert length_sanity_score("x" * 6000) == 0.5
-        # n=8000 floor
-        assert length_sanity_score("x" * 8000) == 0.0
+        # n=7500: 1 - (7500-5000)/5000 = 0.5
+        assert length_sanity_score("x" * 7500) == 0.5
+        # n=10000 floor
+        assert length_sanity_score("x" * 10000) == 0.0
         # n=12000 stays at floor
         assert length_sanity_score("x" * 12000) == 0.0
 
     def test_just_below_band(self):
-        # n=199: 199/200
-        assert length_sanity_score("x" * 199) == pytest.approx(199 / 200)
+        # n=2499: 2499/2500
+        assert length_sanity_score("x" * 2499) == pytest.approx(2499 / 2500)
 
 
 class TestHallucinationScore:
@@ -110,7 +114,8 @@ class TestCompositeReward:
         with patch("corpo_reward._judge_fn", return_value="A"):
             r = composite_reward(
                 diff=sample_diff,
-                rollout="x" * 1000,  # length OK; no identifiers -> no halluc
+                # 3500 chars = v4-baseline length, length_sanity = 1.0
+                rollout="x" * 3500,
                 base_sample="base",
                 reference="ref",
             )
@@ -125,8 +130,21 @@ class TestCompositeReward:
     def test_tie_with_clean_review_correct_weighting(self, sample_diff):
         """Tie pairwise (0.5) + no halluc (1.0) + length OK (1.0) -> 0.5*0.6 + 1*0.3 + 1*0.1 = 0.7."""
         with patch("corpo_reward._judge_fn", return_value="TIE"):
-            r = composite_reward(sample_diff, "x" * 1000, "base", "ref")
+            # 3500 chars = v4-baseline, length_sanity = 1.0
+            r = composite_reward(sample_diff, "x" * 3500, "base", "ref")
             assert r == pytest.approx(0.7)
+
+    def test_length_hacked_rollout_loses_reward(self, sample_diff):
+        """A 750-char length-hacked output (run #1 collapse mode) scores below v4-length output.
+
+        Win pairwise (0.6) + no halluc (0.3) + length_sanity(750)=0.30 (0.03) = 0.93
+        vs v4-length: Win pairwise (0.6) + no halluc (0.3) + length_sanity(3500)=1.0 (0.1) = 1.0
+        The 0.07 gap is the active disincentive against length collapse.
+        """
+        with patch("corpo_reward._judge_fn", return_value="A"):
+            r_short = composite_reward(sample_diff, "x" * 750, "base", "ref")
+            r_v4 = composite_reward(sample_diff, "x" * 3500, "base", "ref")
+            assert r_v4 - r_short == pytest.approx(0.07, abs=0.001)
 
     def test_returns_value_in_unit_interval(self, sample_diff):
         """Output always in [0.0, 1.0]."""
