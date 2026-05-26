@@ -31,6 +31,17 @@ Constraints:
 from __future__ import annotations
 
 import torch
+
+# Unsloth's import side-effect patches `vllm.sampling_params` to provide a
+# `GuidedDecodingParams` shim. vLLM 0.12+ removed it; TRL 0.22.2 still imports
+# it at module-load. Without this `import unsloth` happening BEFORE `from trl`,
+# we get: ImportError: cannot import name 'GuidedDecodingParams' from 'vllm.sampling_params'
+# Wrapped in try/except so local test environments (no unsloth installed) still work.
+try:
+    import unsloth  # noqa: F401 — load for its import-time monkey-patches
+except ImportError:
+    pass
+
 from trl import GRPOTrainer
 
 

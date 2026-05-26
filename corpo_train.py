@@ -24,6 +24,16 @@ Tasks 13-16.
 """
 from __future__ import annotations
 
+# CRITICAL: Unsloth must be imported BEFORE any direct/indirect trl import.
+# vLLM 0.12+ removed GuidedDecodingParams from vllm.sampling_params; TRL 0.22.2
+# still imports it at module-load time. Unsloth's package-init monkey-patches
+# vllm.sampling_params to provide a shim. Wrapped in try/except so local test
+# environments (no unsloth installed) keep working.
+try:
+    import unsloth  # noqa: F401 — load for its import-time monkey-patches
+except ImportError:
+    pass
+
 import argparse
 import sys
 from pathlib import Path
