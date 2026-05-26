@@ -18,29 +18,27 @@ from corpo_reward import (
 
 class TestLengthSanity:
     def test_within_band_returns_one(self):
-        # Plateau [2500, 5000] anchored on v4's 3500-char mean ±30%
-        assert length_sanity_score("x" * 2500) == 1.0
-        assert length_sanity_score("x" * 3500) == 1.0
-        assert length_sanity_score("x" * 5000) == 1.0
+        # Plateau [1500, 4500] anchored on v4's empirical OOD distribution
+        assert length_sanity_score("x" * 1500) == 1.0
+        assert length_sanity_score("x" * 2500) == 1.0  # v4 OOD mode
+        assert length_sanity_score("x" * 4500) == 1.0
 
     def test_too_short_linear_taper(self):
-        # n=1250: 1250/2500 = 0.5
-        assert length_sanity_score("x" * 1250) == 0.5
-        # n=750: length-hacked output gets ~0.30
-        assert length_sanity_score("x" * 750) == pytest.approx(0.30, rel=0.01)
+        # n=750: 750/1500 = 0.5 (length-hacked output gets 0.5)
+        assert length_sanity_score("x" * 750) == 0.5
         assert length_sanity_score("") == 0.0
 
     def test_too_long_linear_taper(self):
-        # n=7500: 1 - (7500-5000)/5000 = 0.5
-        assert length_sanity_score("x" * 7500) == 0.5
-        # n=10000 floor
-        assert length_sanity_score("x" * 10000) == 0.0
+        # n=6750: 1 - (6750-4500)/4500 = 0.5
+        assert length_sanity_score("x" * 6750) == 0.5
+        # n=9000 floor
+        assert length_sanity_score("x" * 9000) == 0.0
         # n=12000 stays at floor
         assert length_sanity_score("x" * 12000) == 0.0
 
     def test_just_below_band(self):
-        # n=2499: 2499/2500
-        assert length_sanity_score("x" * 2499) == pytest.approx(2499 / 2500)
+        # n=1499: 1499/1500
+        assert length_sanity_score("x" * 1499) == pytest.approx(1499 / 1500)
 
 
 class TestHallucinationScore:
@@ -110,41 +108,42 @@ class TestPairwiseScore:
 
 class TestCompositeReward:
     def test_perfect_rollout_scores_one(self, sample_diff):
-        """Wins pairwise + no halluc + length OK -> R = 0.6 + 0.3 + 0.1 = 1.0."""
+        """Wins pairwise + no halluc + length OK -> R = 0.7 + 0.2 + 0.1 = 1.0."""
         with patch("corpo_reward._judge_fn", return_value="A"):
             r = composite_reward(
                 diff=sample_diff,
-                # 3500 chars = v4-baseline length, length_sanity = 1.0
-                rollout="x" * 3500,
+                # 2500 chars: in [1500, 4500] band, length_sanity = 1.0
+                rollout="x" * 2500,
                 base_sample="base",
                 reference="ref",
             )
             assert r == pytest.approx(1.0)
 
     def test_total_loss_scores_above_zero_due_to_unhalluc(self, sample_diff):
-        """Lose pairwise (0) + no halluc (1.0) + bad length (0) -> 0*0.6 + 1*0.3 + 0*0.1 = 0.3."""
+        """Lose pairwise (0) + no halluc (1.0) + bad length (0) -> 0*0.7 + 1*0.2 + 0*0.1 = 0.2."""
         with patch("corpo_reward._judge_fn", return_value="B"):
             r = composite_reward(sample_diff, "", "base", "ref")
-            assert r == pytest.approx(0.3)
+            assert r == pytest.approx(0.2)
 
     def test_tie_with_clean_review_correct_weighting(self, sample_diff):
-        """Tie pairwise (0.5) + no halluc (1.0) + length OK (1.0) -> 0.5*0.6 + 1*0.3 + 1*0.1 = 0.7."""
+        """Tie pairwise (0.5) + no halluc (1.0) + length OK (1.0) -> 0.5*0.7 + 1*0.2 + 1*0.1 = 0.65."""
         with patch("corpo_reward._judge_fn", return_value="TIE"):
-            # 3500 chars = v4-baseline, length_sanity = 1.0
-            r = composite_reward(sample_diff, "x" * 3500, "base", "ref")
-            assert r == pytest.approx(0.7)
+            # 2500 chars: in v4 OOD band, length_sanity = 1.0
+            r = composite_reward(sample_diff, "x" * 2500, "base", "ref")
+            assert r == pytest.approx(0.65)
 
     def test_length_hacked_rollout_loses_reward(self, sample_diff):
-        """A 750-char length-hacked output (run #1 collapse mode) scores below v4-length output.
+        """A 750-char length-hacked output scores below v4-OOD-length output.
 
-        Win pairwise (0.6) + no halluc (0.3) + length_sanity(750)=0.30 (0.03) = 0.93
-        vs v4-length: Win pairwise (0.6) + no halluc (0.3) + length_sanity(3500)=1.0 (0.1) = 1.0
-        The 0.07 gap is the active disincentive against length collapse.
+        Win pairwise (0.7) + no halluc (0.2) + length_sanity(750)=0.5 (0.05) = 0.95
+        vs v4-OOD-length: Win pairwise (0.7) + no halluc (0.2) + length(2500)=1.0 (0.1) = 1.0
+        The 0.05 gap is the residual length-collapse disincentive (smaller now
+        because pairwise carries more of the reward signal).
         """
         with patch("corpo_reward._judge_fn", return_value="A"):
             r_short = composite_reward(sample_diff, "x" * 750, "base", "ref")
-            r_v4 = composite_reward(sample_diff, "x" * 3500, "base", "ref")
-            assert r_v4 - r_short == pytest.approx(0.07, abs=0.001)
+            r_v4 = composite_reward(sample_diff, "x" * 2500, "base", "ref")
+            assert r_v4 - r_short == pytest.approx(0.05, abs=0.001)
 
     def test_returns_value_in_unit_interval(self, sample_diff):
         """Output always in [0.0, 1.0]."""

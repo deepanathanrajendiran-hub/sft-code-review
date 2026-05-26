@@ -21,32 +21,35 @@ from pathlib import Path
 
 
 def length_sanity_score(text: str) -> float:
-    """Reward outputs near v4's baseline length (~3500 chars).
+    """Reward outputs in the empirical v4 OOD length distribution.
 
-    Previous band was [200, 4000] — too permissive. Run #1 (2026-05-26) showed
-    GRPO/CoRPO collapse outputs to ~750 tokens (~2250 chars) while still
-    scoring 1.0 — classic length-hacking failure mode. The model discovered
-    the cheapest path to maintain reward was to shrink to the band lower edge.
+    Calibration history:
+      - Run #1 (band [200, 4000]): permissive, allowed length collapse to 750 tokens
+        with full length-score=1.0. Model learned to game it.
+      - Run #2 first attempt (band [2500, 5000]): anchored at 3500 chars, which was
+        v4's IN-DISTRIBUTION training mean. But empirical mid-training eval
+        (2026-05-26) showed v4 OOD outputs are 600-char extracted reviews
+        (~2000-3500 char full outputs) — much shorter than training-time.
+      - Run #2 final (band [1500, 4500]): matches the actual v4 OOD distribution,
+        with v4's 2500-char full-output mode at the center of the plateau.
 
-    New shape: 1.0 plateau across [2500, 5000] (v4 baseline ±30%), triangular
-    taper outside:
+    Why this matters: a length anchor above v4's deployed-output distribution
+    punishes v4-style outputs as much as it punishes length-hacked outputs.
+    The reward needs to discriminate, not just penalize universally.
+
+    Shape: 1.0 plateau [1500, 4500], linear taper to 0 outside.
       - 0 chars     → 0.0
-      - 750 chars   → 0.30   (length-hacked output gets penalized)
-      - 1750 chars  → 0.70
-      - 2500-5000   → 1.0    (v4 baseline band)
-      - 7500 chars  → 0.50
-      - 10000 chars → 0.0
-
-    This punishes length collapse: a 750-char output now contributes only
-    0.03 to the composite reward (vs 0.10 before), losing 0.07 — a real
-    pressure to maintain v4-like output length.
+      - 750 chars   → 0.50   (still penalty for collapse, but not crippling)
+      - 1500-4500   → 1.0    (v4 OOD band)
+      - 6750 chars  → 0.50
+      - 9000 chars  → 0.0
     """
     n = len(text)
-    if 2500 <= n <= 5000:
+    if 1500 <= n <= 4500:
         return 1.0
-    if n < 2500:
-        return n / 2500
-    return max(0.0, 1.0 - (n - 5000) / 5000)
+    if n < 1500:
+        return n / 1500
+    return max(0.0, 1.0 - (n - 4500) / 4500)
 
 def hallucination_score(diff: str, review_text: str) -> float:
     """Score in [0, 1] = 1.0 - hallucination_rate.
@@ -94,8 +97,19 @@ def pairwise_score(
         return 0.0
     return 0.5  # TIE
 
-PAIRWISE_WEIGHT = 0.6
-HALLUC_WEIGHT = 0.3
+# Run #2 weight rebalance (2026-05-26 after run #1 -22% lift):
+#   - Bumped pairwise from 0.6 → 0.7. Pairwise vs v4 IS the production metric;
+#     the run #1 reward had pairwise contribute only 0.6 of total, so winning
+#     pairwise was worth ~0.6 reward while gaming length+halluc was ~0.4.
+#     Model rationally chose the easier path. Boosting pairwise weight makes
+#     it the dominant signal.
+#   - Reduced halluc from 0.3 → 0.2. Hallucination is a guardrail, not a
+#     primary objective. 0.3 weight gave it too much pull, and the cheapest
+#     way to keep halluc-score high is to be terse — contributing to length
+#     collapse.
+#   - Kept length at 0.1 (small disincentive against runaway/collapsed length).
+PAIRWISE_WEIGHT = 0.7
+HALLUC_WEIGHT = 0.2
 LENGTH_WEIGHT = 0.1
 
 
