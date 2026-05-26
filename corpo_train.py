@@ -119,8 +119,7 @@ def run_training(args: argparse.Namespace) -> None:
 
     import torch
     from datasets import Dataset
-    from peft import PeftModel
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from unsloth import FastLanguageModel
     from trl import GRPOConfig
 
     from corpo_trainer import CoRPOTrainer
@@ -135,8 +134,26 @@ def run_training(args: argparse.Namespace) -> None:
         file=sys.stderr,
     )
 
-    # 2. Format prompts via chat template (matches run_ood_eval format)
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    # 2. Load model via FastLanguageModel — canonical Unsloth GRPO path.
+    # `fast_inference=True` attaches a `vllm_engine` attribute to the model,
+    # which Unsloth's patched GRPOTrainer reads (`self.llm = model.vllm_engine`)
+    # in place of standard TRL vLLM colocation. Passing the v4 adapter as
+    # `model_name` lets Unsloth auto-detect the base model from its
+    # adapter_config.json and load both in one shot — already trainable.
+    print(
+        f"[corpo_train] loading v4 adapter ({args.v4_adapter}) via FastLanguageModel",
+        file=sys.stderr,
+    )
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=args.v4_adapter,
+        max_seq_length=8192,
+        load_in_4bit=False,
+        fast_inference=True,
+        max_lora_rank=32,
+        gpu_memory_utilization=0.9,
+    )
+
+    # 3. Format prompts via chat template (matches run_ood_eval format)
     SYSTEM_MSG = (
         "You are a Senior Software Engineer reviewing code changes. "
         "Provide clear, actionable feedback."
@@ -156,15 +173,6 @@ def run_training(args: argparse.Namespace) -> None:
         return p
 
     dataset = Dataset.from_list([_format(p) for p in prompts])
-
-    # 3. Load model with v4 LoRA adapter — continue-training the existing LoRA
-    print(f"[corpo_train] loading {args.base_model} + v4 LoRA", file=sys.stderr)
-    base = AutoModelForCausalLM.from_pretrained(
-        args.base_model,
-        dtype=torch.bfloat16,
-        device_map="auto",
-    )
-    model = PeftModel.from_pretrained(base, args.v4_adapter, is_trainable=True)
 
     # 4. Reward function — closure captures base_cache
     def reward_fn(prompts: list[str], completions: list[str], **kwargs) -> list[float]:
@@ -207,7 +215,10 @@ def run_training(args: argparse.Namespace) -> None:
         logging_steps=10,
         temperature=1.0,
         use_vllm=True,
-        vllm_mode="colocate",
+        # NOTE: vllm_mode intentionally NOT set. Unsloth's patched GRPOTrainer
+        # uses `model.vllm_engine` directly (from FastLanguageModel) rather than
+        # TRL's standard server/colocate paths. The default ("server") is a
+        # no-op when Unsloth's patches are active.
         bf16=True,
         scale_rewards="none",  # CoRPOTrainer requires this
     )
