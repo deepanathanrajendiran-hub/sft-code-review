@@ -72,6 +72,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="After training, copy final adapter to this path (e.g., Drive). Uses shutil.copytree.",
     )
+    ap.add_argument(
+        "--checkpoint-sync-dir",
+        default=None,
+        help=(
+            "If set, every checkpoint saved during training is also mirrored here "
+            "(typically a Drive path). Survives Colab session boundaries — required "
+            "for any run that won't finish in one session. Uses shutil.copytree."
+        ),
+    )
     return ap.parse_args(argv)
 
 
@@ -254,6 +263,36 @@ def run_training(args: argparse.Namespace) -> None:
         reward_funcs=reward_fn,
         r_min_correct=args.r_min_correct,
     )
+
+    # Mirror every saved checkpoint to a persistent location (typically Drive).
+    # Colab session disconnects wipe /content/, so without this any in-session
+    # checkpoints are lost; resume becomes impossible.
+    if args.checkpoint_sync_dir:
+        import shutil as _shutil
+        from transformers import TrainerCallback
+        _sync_dir = Path(args.checkpoint_sync_dir)
+
+        class _DriveCheckpointSync(TrainerCallback):
+            def on_save(self, _args, state, control, **kwargs):
+                step = state.global_step
+                src = Path(_args.output_dir) / f"checkpoint-{step}"
+                if not src.exists():
+                    return
+                _sync_dir.mkdir(parents=True, exist_ok=True)
+                dst = _sync_dir / f"checkpoint-{step}"
+                if dst.exists():
+                    _shutil.rmtree(dst)
+                _shutil.copytree(src, dst)
+                print(
+                    f"[corpo_train] synced checkpoint-{step} → {dst}",
+                    file=sys.stderr,
+                )
+
+        trainer.add_callback(_DriveCheckpointSync())
+        print(
+            f"[corpo_train] checkpoint sync enabled → {_sync_dir}",
+            file=sys.stderr,
+        )
 
     # 6. Train (resume support added by Task 15)
     print(
