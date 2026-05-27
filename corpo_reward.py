@@ -21,35 +21,30 @@ from pathlib import Path
 
 
 def length_sanity_score(text: str) -> float:
-    """Reward outputs in the empirical v4 OOD length distribution.
+    """Reward outputs in the v4 OOD extracted-review distribution.
 
-    Calibration history:
-      - Run #1 (band [200, 4000]): permissive, allowed length collapse to 750 tokens
-        with full length-score=1.0. Model learned to game it.
-      - Run #2 first attempt (band [2500, 5000]): anchored at 3500 chars, which was
-        v4's IN-DISTRIBUTION training mean. But empirical mid-training eval
-        (2026-05-26) showed v4 OOD outputs are 600-char extracted reviews
-        (~2000-3500 char full outputs) — much shorter than training-time.
-      - Run #2 final (band [1500, 4500]): matches the actual v4 OOD distribution,
-        with v4's 2500-char full-output mode at the center of the plateau.
+    Calibration:
+      - v4-deployed extracted-review median ~600 chars (per 2026-05-22 journal)
+      - Plateau [150, 1000] covers terse-to-thorough reviews
+      - Linear taper to 0 at 0 chars (collapse) and 2500 chars (explosion)
 
-    Why this matters: a length anchor above v4's deployed-output distribution
-    punishes v4-style outputs as much as it punishes length-hacked outputs.
-    The reward needs to discriminate, not just penalize universally.
+    The band is anchored to the *extracted review* string (post-_extract_review),
+    NOT the raw rollout. This matches what composite_reward now scores and what
+    production deployment evaluates.
 
-    Shape: 1.0 plateau [1500, 4500], linear taper to 0 outside.
-      - 0 chars     → 0.0
-      - 750 chars   → 0.50   (still penalty for collapse, but not crippling)
-      - 1500-4500   → 1.0    (v4 OOD band)
-      - 6750 chars  → 0.50
-      - 9000 chars  → 0.0
+    Shape:
+      - 0 chars     -> 0.0
+      - 75 chars    -> 0.50
+      - 150-1000    -> 1.0    (v4 OOD band)
+      - 1750 chars  -> 0.50
+      - 2500+ chars -> 0.0
     """
     n = len(text)
-    if 1500 <= n <= 4500:
+    if 150 <= n <= 1000:
         return 1.0
-    if n < 1500:
-        return n / 1500
-    return max(0.0, 1.0 - (n - 4500) / 4500)
+    if n < 150:
+        return n / 150
+    return max(0.0, 1.0 - (n - 1000) / 1500)
 
 def hallucination_score(diff: str, review_text: str) -> float:
     """Score in [0, 1] = 1.0 - hallucination_rate.

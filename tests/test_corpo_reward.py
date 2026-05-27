@@ -18,27 +18,27 @@ from corpo_reward import (
 
 class TestLengthSanity:
     def test_within_band_returns_one(self):
-        # Plateau [1500, 4500] anchored on v4's empirical OOD distribution
-        assert length_sanity_score("x" * 1500) == 1.0
-        assert length_sanity_score("x" * 2500) == 1.0  # v4 OOD mode
-        assert length_sanity_score("x" * 4500) == 1.0
+        # Plateau [150, 1000] anchored on v4 OOD extracted-review distribution (median ~600 chars)
+        assert length_sanity_score("x" * 150) == 1.0
+        assert length_sanity_score("x" * 600) == 1.0   # v4 OOD median
+        assert length_sanity_score("x" * 1000) == 1.0
 
     def test_too_short_linear_taper(self):
-        # n=750: 750/1500 = 0.5 (length-hacked output gets 0.5)
-        assert length_sanity_score("x" * 750) == 0.5
+        # n=75: 75/150 = 0.5
+        assert length_sanity_score("x" * 75) == 0.5
         assert length_sanity_score("") == 0.0
 
     def test_too_long_linear_taper(self):
-        # n=6750: 1 - (6750-4500)/4500 = 0.5
-        assert length_sanity_score("x" * 6750) == 0.5
-        # n=9000 floor
-        assert length_sanity_score("x" * 9000) == 0.0
-        # n=12000 stays at floor
-        assert length_sanity_score("x" * 12000) == 0.0
+        # n=1750: 1 - (1750 - 1000) / 1500 = 0.5
+        assert length_sanity_score("x" * 1750) == 0.5
+        # n=2500: floor
+        assert length_sanity_score("x" * 2500) == 0.0
+        # n=5000: stays at floor
+        assert length_sanity_score("x" * 5000) == 0.0
 
     def test_just_below_band(self):
-        # n=1499: 1499/1500
-        assert length_sanity_score("x" * 1499) == pytest.approx(1499 / 1500)
+        # n=149: 149/150
+        assert length_sanity_score("x" * 149) == pytest.approx(149 / 150)
 
 
 class TestHallucinationScore:
