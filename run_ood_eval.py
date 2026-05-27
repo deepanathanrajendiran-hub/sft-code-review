@@ -1,11 +1,13 @@
-"""Sequential vLLM inference: v4 first, then base, on a JSONL of diffs.
+"""OOD evaluation runner for code-review LoRAs.
 
-Loads each model in turn, generates with production sampling
-(temp=0, max_tokens=4096, repetition_penalty=1.1), applies _extract_review
-post-process, and writes per-row predictions.
+Primary use: invoke as a CLI script via `python run_ood_eval.py ...` to
+generate predictions and compute metrics on the SWE-CARE eval set.
 
-Must be invoked as `python run_ood_eval.py …` (not imported) — vLLM v1's
-multiprocessing requires a main-guard.
+The module is also safe to import — specifically, `_extract_review` is
+used by `corpo_reward.py` as a library helper for reward-time review
+extraction. Heavy dependencies (vLLM, transformers) are imported inside
+function bodies, not at module load, so importing this file has no side
+effects beyond stdlib imports.
 """
 from __future__ import annotations
 

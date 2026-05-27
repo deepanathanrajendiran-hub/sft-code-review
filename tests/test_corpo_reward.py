@@ -234,3 +234,21 @@ class TestReviewExtraction:
             r = composite_reward(sample_diff, rollout, "base", "ref")
             # halluc on "The change looks fine." should be 1.0 (no backticked identifiers in review)
             assert r > 0.9  # only the small length penalty applies
+
+    def test_bare_text_rollout_treated_as_review(self, sample_diff):
+        """A rollout with no <think>/<review> tags falls back to scoring the raw text.
+
+        _extract_review's fallback path returns the stripped raw rollout when no
+        <review> block is present. This is intentional: matches production
+        extractor behavior. The pairwise judge will separately penalize
+        unstructured outputs, so length/hallucination scoring this as a review
+        is acceptable.
+        """
+        bare_review = "The change looks fine, but `validate_token` is suspicious."
+        # Note: bare_review has 65 chars — below the [150, 1000] plateau, so
+        # length_sanity will be 65/150 ≈ 0.433, but the test asserts only that
+        # the reward is computed (non-zero), not the exact value.
+        with patch("corpo_reward._judge_fn", return_value="A"):
+            r = composite_reward(sample_diff, bare_review, "base", "ref")
+            assert r > 0.0, "bare-text rollout should fall back to scoring the raw text"
+            assert r < 1.0, "non-empty bare-text rollout should score, not be perfect"

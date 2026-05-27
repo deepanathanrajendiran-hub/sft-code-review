@@ -1,14 +1,19 @@
 """Composite reward function for CoRPO training.
 
-Reward = 0.6 * pairwise_score + 0.3 * hallucination_score + 0.1 * length_sanity_score
+Reward = 0.7 * pairwise_score + 0.2 * hallucination_score + 0.1 * length_sanity_score
 All components return values in [0.0, 1.0]. Composite is also [0.0, 1.0].
 
-This module is built incrementally:
-  Task 7  — length_sanity_score (this task)
-  Task 8  — hallucination_score
-  Task 9  — pairwise_score
-  Task 10 — composite_reward (combines 7+8+9)
-  Task 11 — BaseSampleCache + --build-base-cache CLI
+Scoring operates on the EXTRACTED REVIEW (post-_extract_review), not on the raw
+rollout. This matches what production deployment evaluates. An empty or
+placeholder extraction returns 0.0 immediately.
+
+Module structure:
+  - length_sanity_score : pure-Python band reward, anchored on v4 OOD distribution
+  - hallucination_score : wraps ood_metrics.hallucination_rate
+  - pairwise_score      : binary 0/0.5/1.0 reward via DeepSeek V4-Pro judge
+  - composite_reward    : weighted sum of the three (entry point for the trainer)
+  - BaseSampleCache     : in-memory lookup for cached base-model rollouts
+  - _build_base_cache_cli : CLI to pre-generate the base-sample cache
 """
 from __future__ import annotations
 from ood_metrics import hallucination_rate as _ood_hallucination_rate
@@ -126,7 +131,8 @@ def composite_reward(
       + HALLUC_WEIGHT   * hallucination_score(diff, review)
       + LENGTH_WEIGHT   * length_sanity_score(review)
     """
-    review = _extract_review(rollout) or ""
+    # _extract_review always returns str (never None); strip handles whitespace-only.
+    review = _extract_review(rollout)
     # Placeholder ("..." only) is a deployment failure; treat as no review.
     if not review or review.strip() in ("", "..."):
         return 0.0
