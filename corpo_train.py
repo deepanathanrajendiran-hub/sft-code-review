@@ -415,6 +415,17 @@ def _generate_v4_rollouts(
 
 
 def run_variance_gate(args: argparse.Namespace) -> bool:
+    """Generate 8 rollouts × 50 prompts with v4 policy; check reward spread.
+
+    Generates `args.num_generations` rollouts for each of up to 50 random training
+    prompts using the v4 LoRA via vLLM, scores them with `composite_reward`, and
+    inspects the within-group reward std as a signal-strength check. Also prints
+    a histogram and percentile-based R_min suggestions so the operator can pick
+    a calibrated `--r-min-correct` value for the actual training run.
+
+    Returns True if mean within-group std >= 0.10. Side effect: writes a verdict,
+    histogram, and percentile candidates to stderr.
+    """
     import json
     import random
     from corpo_reward import composite_reward, load_base_sample_cache
@@ -467,10 +478,20 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
     # composite rewards in [0,1], pick from the rollout distribution itself —
     # NOT an aspirational quality target. Default recommendation: p33.
     p25, p33, p40, p50 = np.percentile(rewards.ravel(), [25, 33, 40, 50])
+    if not passed:
+        print(
+            "[variance-gate] WARNING: gate FAILED — rollout distribution is too narrow. "
+            "Percentile values below are unreliable; do NOT use them for R_min. "
+            "Investigate the reward function or base-sample cache before training.",
+            file=sys.stderr,
+        )
     print(f"[variance-gate] R_min candidates (pick from rollout distribution):", file=sys.stderr)
     print(f"  p25={p25:.3f}   p33={p33:.3f}   p40={p40:.3f}   p50={p50:.3f}", file=sys.stderr)
-    print(f"  -> recommended default: p33 = {p33:.3f}", file=sys.stderr)
-    print(f"  -> pass via: --r-min-correct {p33:.3f}", file=sys.stderr)
+    if passed:
+        print(f"  -> recommended default: p33 = {p33:.3f}", file=sys.stderr)
+        print(f"  -> pass via: --r-min-correct {p33:.3f}", file=sys.stderr)
+    else:
+        print("  -> recommendation withheld (gate failed; see WARNING above)", file=sys.stderr)
     print(f"[variance-gate] verdict: {'PASS' if passed else 'FAIL'}", file=sys.stderr)
     return passed
 
