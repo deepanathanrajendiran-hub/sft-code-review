@@ -55,7 +55,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Directory for checkpoints and final adapter")
     ap.add_argument("--base-model", default="unsloth/Qwen2.5-Coder-7B-Instruct")
     ap.add_argument("--r-min-correct", type=float, default=0.5)
-    ap.add_argument("--kl-beta", type=float, default=0.01)
+    ap.add_argument(
+        "--kl-beta",
+        type=float,
+        default=0.0,
+        help="KL coefficient to reference. CoRPO paper uses 0; LoRA's implicit "
+             "regularization makes explicit KL less necessary on 7B (Sun et al. 2309.09055). "
+             "Pass --kl-beta 0.001 if a small safety belt is desired.",
+    )
     ap.add_argument("--learning-rate", type=float, default=5e-6)
     ap.add_argument("--num-generations", type=int, default=8,
                     help="G in CoRPO; rollouts per prompt")
@@ -252,6 +259,7 @@ def run_training(args: argparse.Namespace) -> None:
         # TRL's standard server/colocate paths. The default ("server") is a
         # no-op when Unsloth's patches are active.
         bf16=True,
+        loss_type="dr_grpo",  # Run #3 fix: length-bias mitigation (arXiv:2503.20783)
         scale_rewards="none",  # CoRPOTrainer requires this
     )
 
@@ -318,6 +326,21 @@ def run_training(args: argparse.Namespace) -> None:
 def main():
     args = parse_args()
     verify_v4_backup(args.v4_backup, args.v4_adapter)
+
+    # Pre-flight: assert TRL exposes loss_type so Dr.GRPO can be applied.
+    # If silently absent, the run would degenerate to default ("bnpo") which
+    # is the source of the length pathology documented in Runs #1 and #2.
+    import inspect
+    from trl import GRPOConfig as _GRPOC
+    _trl_params = inspect.signature(_GRPOC).parameters
+    if "loss_type" not in _trl_params:
+        raise RuntimeError(
+            "TRL version does not expose GRPOConfig.loss_type. Abort: Run #3 "
+            "depends on loss_type='dr_grpo' to fix the length-aggregation bias. "
+            "Verify TRL is pinned at 0.22.2 (or compatible) and retry."
+        )
+    print("[corpo_train] pre-flight: TRL exposes loss_type ✓", file=sys.stderr)
+
     if args.variance_gate_only:
         passed = run_variance_gate(args)
         sys.exit(0 if passed else 1)

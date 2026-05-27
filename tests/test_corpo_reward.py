@@ -252,3 +252,22 @@ class TestReviewExtraction:
             r = composite_reward(sample_diff, bare_review, "base", "ref")
             assert r > 0.0, "bare-text rollout should fall back to scoring the raw text"
             assert r < 1.0, "non-empty bare-text rollout should score, not be perfect"
+
+class TestTRLPreflightAssertion:
+    """The pre-flight assertion must catch a TRL version that doesn't expose loss_type.
+
+    This protects against silently no-op-ing loss_type='dr_grpo' if TRL changes
+    or rolls back the parameter name in a future upgrade.
+    """
+
+    def test_loss_type_parameter_exists_in_current_trl(self):
+        import inspect
+        try:
+            from trl import GRPOConfig
+        except ImportError:
+            pytest.skip("TRL not installed in this test environment")
+        sig = inspect.signature(GRPOConfig).parameters
+        assert "loss_type" in sig, (
+            "TRL version does not expose loss_type — Run #3 cannot apply the "
+            "Dr.GRPO fix. Verify TRL is pinned at 0.22.2 or upgrade."
+        )
