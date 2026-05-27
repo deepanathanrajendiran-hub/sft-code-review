@@ -415,10 +415,6 @@ def _generate_v4_rollouts(
 
 
 def run_variance_gate(args: argparse.Namespace) -> bool:
-    """Generate 8 rollouts × 50 prompts with v4 policy; check reward spread.
-
-    Returns True if mean within-group std >= 0.10. Prints histogram + verdict to stderr.
-    """
     import json
     import random
     from corpo_reward import composite_reward, load_base_sample_cache
@@ -465,6 +461,16 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
     hist, edges = np.histogram(rewards.ravel(), bins=10, range=(0, 1))
     for h, e in zip(hist, edges[:-1]):
         print(f"  [{e:.1f}, {e+0.1:.1f}): {'#' * min(h, 60)}  ({h})", file=sys.stderr)
+
+    # R_min calibration: CoRPO paper sets R_min at the correctness boundary
+    # (below median of correct rollouts, above max of incorrect). For continuous
+    # composite rewards in [0,1], pick from the rollout distribution itself —
+    # NOT an aspirational quality target. Default recommendation: p33.
+    p25, p33, p40, p50 = np.percentile(rewards.ravel(), [25, 33, 40, 50])
+    print(f"[variance-gate] R_min candidates (pick from rollout distribution):", file=sys.stderr)
+    print(f"  p25={p25:.3f}   p33={p33:.3f}   p40={p40:.3f}   p50={p50:.3f}", file=sys.stderr)
+    print(f"  -> recommended default: p33 = {p33:.3f}", file=sys.stderr)
+    print(f"  -> pass via: --r-min-correct {p33:.3f}", file=sys.stderr)
     print(f"[variance-gate] verdict: {'PASS' if passed else 'FAIL'}", file=sys.stderr)
     return passed
 
