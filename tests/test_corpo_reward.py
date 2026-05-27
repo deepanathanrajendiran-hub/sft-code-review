@@ -111,51 +111,65 @@ class TestPairwiseScore:
             assert args.args[3] == "REF"
 
 class TestCompositeReward:
+    def _wrap_as_rollout(self, review_body: str) -> str:
+        """Wrap a review body in <think>+<review> structure for testing."""
+        return f"<think>analysis</think><review>{review_body}</review>"
+
     def test_perfect_rollout_scores_one(self, sample_diff):
         """Wins pairwise + no halluc + length OK -> R = 0.7 + 0.2 + 0.1 = 1.0."""
         with patch("corpo_reward._judge_fn", return_value="A"):
+            # 600 chars: in [150, 1000] band, length_sanity = 1.0
+            rollout = self._wrap_as_rollout("x" * 600)
             r = composite_reward(
                 diff=sample_diff,
-                # 600 chars: in [150, 1000] band, length_sanity = 1.0
-                rollout="x" * 600,
+                rollout=rollout,
                 base_sample="base",
                 reference="ref",
             )
             assert r == pytest.approx(1.0)
 
     def test_total_loss_scores_above_zero_due_to_unhalluc(self, sample_diff):
-        """Lose pairwise (0) + no halluc (1.0) + bad length (0) -> 0*0.7 + 1*0.2 + 0*0.1 = 0.2."""
+        """Lose pairwise (0) + no halluc (1.0) + tiny length -> ~0.2.
+
+        Uses a 1-char extracted review: in-band-extracted but well below the
+        length plateau, scoring 1/150 ≈ 0.00667 on length.
+        """
         with patch("corpo_reward._judge_fn", return_value="B"):
-            r = composite_reward(sample_diff, "", "base", "ref")
-            assert r == pytest.approx(0.2)
+            rollout = self._wrap_as_rollout("x")  # 1 char extracted, no idents
+            r = composite_reward(sample_diff, rollout, "base", "ref")
+            # pair=0, halluc=1.0, length = 1/150 = 0.00667
+            # R = 0*0.7 + 1*0.2 + 0.00667*0.1 = 0.2007
+            assert r == pytest.approx(0.2 + 0.00067, abs=0.001)
 
     def test_tie_with_clean_review_correct_weighting(self, sample_diff):
         """Tie pairwise (0.5) + no halluc (1.0) + length OK (1.0) -> 0.5*0.7 + 1*0.2 + 1*0.1 = 0.65."""
         with patch("corpo_reward._judge_fn", return_value="TIE"):
-            # 600 chars: in [150, 1000] band, length_sanity = 1.0
-            r = composite_reward(sample_diff, "x" * 600, "base", "ref")
+            rollout = self._wrap_as_rollout("x" * 600)
+            r = composite_reward(sample_diff, rollout, "base", "ref")
             assert r == pytest.approx(0.65)
 
     def test_length_hacked_rollout_loses_reward(self, sample_diff):
-        """A 75-char length-hacked output scores below in-band-length output.
+        """A 75-char (extracted) length-hacked review scores below v4-OOD-length.
 
         Win pairwise (0.7) + no halluc (0.2) + length_sanity(75)=0.5 (0.05) = 0.95
-        vs in-band-length: Win pairwise (0.7) + no halluc (0.2) + length(600)=1.0 (0.1) = 1.0
-        The 0.05 gap is the residual length-collapse disincentive (smaller now
-        because pairwise carries more of the reward signal).
+        vs v4-OOD-length: 0.7 + 0.2 + 1.0*0.1 = 1.0
         """
         with patch("corpo_reward._judge_fn", return_value="A"):
-            r_short = composite_reward(sample_diff, "x" * 75, "base", "ref")
-            r_v4 = composite_reward(sample_diff, "x" * 600, "base", "ref")
+            r_short = composite_reward(
+                sample_diff, self._wrap_as_rollout("x" * 75), "base", "ref"
+            )
+            r_v4 = composite_reward(
+                sample_diff, self._wrap_as_rollout("x" * 600), "base", "ref"
+            )
             assert r_v4 - r_short == pytest.approx(0.05, abs=0.001)
 
     def test_returns_value_in_unit_interval(self, sample_diff):
         """Output always in [0.0, 1.0]."""
         with patch("corpo_reward._judge_fn", return_value="A"):
-            r = composite_reward(sample_diff, "x" * 100, "base", "ref")
+            r = composite_reward(sample_diff, self._wrap_as_rollout("x" * 50), "base", "ref")
             assert 0.0 <= r <= 1.0
         with patch("corpo_reward._judge_fn", return_value="B"):
-            r = composite_reward(sample_diff, "x" * 12000, "base", "ref")
+            r = composite_reward(sample_diff, self._wrap_as_rollout("x" * 3000), "base", "ref")
             assert 0.0 <= r <= 1.0
 
 
@@ -175,3 +189,48 @@ class TestBaseSampleCache:
         cache = load_base_sample_cache(cache_path)
         with pytest.raises(KeyError, match="id_99"):
             cache.get("id_99")
+
+class TestReviewExtraction:
+    """composite_reward should extract the <review> block before scoring length and hallucination."""
+
+    def test_empty_rollout_returns_zero(self, sample_diff):
+        """A rollout with no parseable review is a deployment failure → reward 0.0."""
+        with patch("corpo_reward._judge_fn", return_value="A"):
+            r = composite_reward(sample_diff, "", "base", "ref")
+            assert r == 0.0
+
+    def test_placeholder_only_rollout_returns_zero(self, sample_diff):
+        """A rollout where the only <review> block is a literal '...' placeholder → reward 0.0.
+
+        Matches the v4 deployment behavior where the extractor returns empty for
+        placeholder reviews and the extracted string is unusable.
+        """
+        rollout = "<think>I'll write the review: <review>...</review></think>"
+        with patch("corpo_reward._judge_fn", return_value="A"):
+            r = composite_reward(sample_diff, rollout, "base", "ref")
+            assert r == 0.0
+
+    def test_valid_rollout_extracts_and_scores(self, sample_diff):
+        """A rollout with <think> + valid <review> scores on the extracted review only."""
+        review_body = "x" * 600  # in v4 OOD band → length=1.0
+        rollout = f"<think>analysis here</think><review>{review_body}</review>"
+        with patch("corpo_reward._judge_fn", return_value="A"):
+            r = composite_reward(sample_diff, rollout, "base", "ref")
+            # 0.7 (pair=1) + 0.2 (halluc=1, no idents in review_body) + 0.1 (length=1) = 1.0
+            assert r == pytest.approx(1.0)
+
+    def test_think_block_identifiers_ignored(self, sample_diff):
+        """Identifiers in <think> that aren't in the diff should NOT count as hallucinations.
+
+        Pre-Run-#3, the <think> block was scored for hallucinations, penalizing
+        exploratory reasoning that referenced library APIs. Now only the
+        extracted review is scored.
+        """
+        rollout = (
+            "<think>maybe `validate_token` is involved here</think>"
+            "<review>The change looks fine.</review>"
+        )
+        with patch("corpo_reward._judge_fn", return_value="A"):
+            r = composite_reward(sample_diff, rollout, "base", "ref")
+            # halluc on "The change looks fine." should be 1.0 (no backticked identifiers in review)
+            assert r > 0.9  # only the small length penalty applies

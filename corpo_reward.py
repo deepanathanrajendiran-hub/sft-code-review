@@ -18,6 +18,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from run_ood_eval import _extract_review
 
 
 def length_sanity_score(text: str) -> float:
@@ -116,27 +117,23 @@ def composite_reward(
 ) -> float:
     """Composite reward in [0, 1] for CoRPO training.
 
-    R = PAIRWISE_WEIGHT * pairwise_score
-      + HALLUC_WEIGHT   * hallucination_score
-      + LENGTH_WEIGHT   * length_sanity_score
+    Scoring is performed on the EXTRACTED REVIEW (post-_extract_review), not on
+    the raw rollout. This matches what production deployment evaluates and what
+    the v4 OOD length distribution was measured against. An empty/placeholder
+    extraction returns 0.0 — failure of the extractor IS failure at deployment.
 
-    With current weights (0.6, 0.3, 0.1), R = 1.0 iff:
-      - rollout beats base in pairwise (pairwise = 1.0)
-      - no hallucinated identifiers (halluc = 1.0)
-      - length in [200, 4000] (length = 1.0)
-
-    R_min_correct = 0.5 in the CoRPO trainer config: a rollout that wins
-    pairwise (0.6) clears the bar even if length/halluc are zero, but a
-    rollout that only has clean output without winning pairwise (0.3+0.1=0.4)
-    does not.
+    R = PAIRWISE_WEIGHT * pairwise_score(review, base_sample, ...)
+      + HALLUC_WEIGHT   * hallucination_score(diff, review)
+      + LENGTH_WEIGHT   * length_sanity_score(review)
     """
-    r_pair = pairwise_score(diff, rollout, base_sample, reference)
-    r_halluc = hallucination_score(diff, rollout)
-    # NOTE: length is scored on the full rollout (think + review), NOT on extracted review.
-    # The 200-4000 char band reflects typical review-only sizing; well-formed v4-style
-    # outputs with think blocks may exceed it. If reward is consistently capped at
-    # zero from length, either bump the upper bound here or apply _extract_review first.
-    r_length = length_sanity_score(rollout)
+    review = _extract_review(rollout) or ""
+    # Placeholder ("..." only) is a deployment failure; treat as no review.
+    if not review or review.strip() in ("", "..."):
+        return 0.0
+
+    r_pair = pairwise_score(diff, review, base_sample, reference)
+    r_halluc = hallucination_score(diff, review)
+    r_length = length_sanity_score(review)
     return (
         PAIRWISE_WEIGHT * r_pair
         + HALLUC_WEIGHT * r_halluc
