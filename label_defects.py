@@ -108,14 +108,14 @@ def build_extraction_prompt(diff: str, comment: dict) -> str:
 
 def _deepseek_extract(diff: str, comment: dict) -> dict | None:
     """Default classifier: DeepSeek V4-Pro, grounded in the existing comment text."""
-    from ood_metrics import _get_deepseek_client
+    from ood_metrics import _get_deepseek_client, DEEPSEEK_V4_PRO
 
     client = _get_deepseek_client()
     resp = client.chat.completions.create(
-        model="deepseek-chat",
+        model=DEEPSEEK_V4_PRO,
         messages=[{"role": "user", "content": build_extraction_prompt(diff, comment)}],
         max_tokens=200,
-        temperature=0.0,
+        extra_body={"thinking": {"type": "disabled"}},
     )
     return parse_extraction(resp.choices[0].message.content)
 

@@ -37,13 +37,7 @@ def recall(review: str, defects: list[dict], match_fn=None) -> float:
 
 
 def deepseek_defect_match_judge(review: str, defect: dict) -> bool:
-    """Constrained DeepSeek V4-Pro yes/no: does `review` identify this defect?
-
-    Grounded in a single known defect (issue_type + location + canonical_desc),
-    so the judgment is verifiable, not a subjective quality comparison. Lazy-imports
-    the client so importing this module has no side effects.
-    """
-    from ood_metrics import _get_deepseek_client
+    from ood_metrics import _get_deepseek_client, DEEPSEEK_V4_PRO
 
     client = _get_deepseek_client()
     prompt = (
@@ -57,13 +51,14 @@ def deepseek_defect_match_judge(review: str, defect: dict) -> bool:
         "Does the review identify THIS defect (same underlying issue, location need not be exact)? "
         "Answer with exactly one word: YES or NO."
     )
+    # Mirror ood_metrics' DeepSeek convention: V4-Pro, thinking disabled (~3x faster).
     resp = client.chat.completions.create(
-        model="deepseek-chat",
+        model=DEEPSEEK_V4_PRO,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=2,
-        temperature=0.0,
+        max_tokens=4,
+        extra_body={"thinking": {"type": "disabled"}},
     )
-    answer = resp.choices[0].message.content.strip().upper()
+    answer = (resp.choices[0].message.content or "").strip().upper()
     return answer.startswith("Y")
 
 
