@@ -20,8 +20,8 @@ def test_variance_gate_only_aborts_on_missing_backup(tmp_path):
     """corpo_train.py must refuse to run if --v4-backup path is missing."""
     train = tmp_path / "train.jsonl"
     train.write_text(json.dumps({"instance_id": "x", "diff": "x"}) + "\n")
-    cache = tmp_path / "base.jsonl"
-    cache.write_text(json.dumps({"instance_id": "x", "base_output": "y"}) + "\n")
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"instance_id": "x", "defects": []}) + "\n")
 
     result = subprocess.run(
         [
@@ -29,7 +29,7 @@ def test_variance_gate_only_aborts_on_missing_backup(tmp_path):
             "--v4-adapter", "/nonexistent",
             "--v4-backup", "/definitely/not/here",
             "--train-prompts", str(train),
-            "--base-cache", str(cache),
+            "--defect-labels", str(labels),
             "--output-dir", str(tmp_path / "out"),
             "--variance-gate-only",
         ],

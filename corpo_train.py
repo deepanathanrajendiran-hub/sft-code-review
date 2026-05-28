@@ -6,7 +6,7 @@ Usage:
         --v4-adapter /path/to/v4-lora \\
         --v4-backup  /path/to/v4-lora-backup \\
         --train-prompts ood_train_prompts.jsonl \\
-        --base-cache cache/base_samples.jsonl \\
+        --defect-labels cache/defect_labels.jsonl \\
         --output-dir /content/corpo-out
 
     # Full training (~4-6h on Colab A100)
@@ -38,30 +38,33 @@ import argparse
 import sys
 from pathlib import Path
 import numpy as np
+from corpo_reward import verifiable_reward
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse CLI arguments. argv=None uses sys.argv[1:]."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--v4-adapter", required=True,
                     help="Path to v4 LoRA adapter to continue training")
     ap.add_argument("--v4-backup", required=True,
                     help="Path to v4 LoRA backup (training refuses to start without it)")
     ap.add_argument("--train-prompts", required=True,
-                    help="JSONL of training prompts (SWE-CARE 80%% split)")
-    ap.add_argument("--base-cache", required=True,
-                    help="JSONL of cached base-model rollouts (built by corpo_reward.py --build-base-cache)")
+                    help="JSONL of training prompts (SWE-CARE dev split)")
+    ap.add_argument("--defect-labels", required=True,
+                    help="JSONL of clean defect tuples per instance "
+                         "(built by label_defects.py): {instance_id, defects:[{path,line,issue_type,canonical_desc}]}")
     ap.add_argument("--output-dir", required=True,
                     help="Directory for checkpoints and final adapter")
     ap.add_argument("--base-model", default="unsloth/Qwen2.5-Coder-7B-Instruct")
-    ap.add_argument("--r-min-correct", type=float, default=0.5)
+    ap.add_argument("--r-min-correct", type=float, default=0.5,
+                    help="CoRPO baseline-clip threshold. Calibrate from the v5 variance "
+                         "gate's p33 of the v4 reward distribution (correctness boundary).")
     ap.add_argument(
         "--kl-beta",
         type=float,
-        default=0.0,
-        help="KL coefficient to reference. CoRPO paper uses 0; LoRA's implicit "
-             "regularization makes explicit KL less necessary on 7B (Sun et al. 2309.09055). "
-             "Pass --kl-beta 0.001 if a small safety belt is desired.",
+        default=0.02,
+        help="KL coefficient to the v4 reference. v5 restores KL>0 (Run #3's beta=0 "
+             "removed the only anchor to v4 and caused capability/format drift). "
+             "DeepSeek-Math used 0.04, R1 used 0.001; 0.02 is a mid anchor.",
     )
     ap.add_argument("--learning-rate", type=float, default=5e-6)
     ap.add_argument("--num-generations", type=int, default=8,
@@ -71,7 +74,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--checkpoint-every", type=int, default=50)
     ap.add_argument("--variance-gate-only", action="store_true",
-                    help="Run pre-training variance check on 50 prompts and exit (Task 13)")
+                    help="Run pre-training variance check on 50 prompts and exit")
     ap.add_argument("--resume", default=None,
                     help="Resume from checkpoint directory")
     ap.add_argument(
@@ -139,14 +142,16 @@ def run_training(args: argparse.Namespace) -> None:
     from trl import GRPOConfig
 
     from corpo_trainer import CoRPOTrainer
-    from corpo_reward import composite_reward, load_base_sample_cache
 
-    # 1. Load training prompts and the pre-built base-sample cache
+    # 1. Load training prompts and the clean defect-tuple labels (v5: no opponent)
     with open(args.train_prompts) as fh:
         prompts = [json.loads(line) for line in fh if line.strip()]
-    base_cache = load_base_sample_cache(args.base_cache)
+    defect_labels = load_defect_labels(args.defect_labels)
+    n_labeled = sum(1 for v in defect_labels.values() if v)
     print(
-        f"[corpo_train] loaded {len(prompts)} prompts + {len(base_cache._data)} base samples",
+        f"[corpo_train] loaded {len(prompts)} prompts + defect labels for "
+        f"{len(defect_labels)} instances ({n_labeled} with >=1 defect, "
+        f"{len(defect_labels) - n_labeled} clean)",
         file=sys.stderr,
     )
 
@@ -213,27 +218,9 @@ def run_training(args: argparse.Namespace) -> None:
         )
     dataset = Dataset.from_list(formatted)
 
-    # 4. Reward function — closure captures base_cache
-    def reward_fn(prompts: list[str], completions: list[str], **kwargs) -> list[float]:
-        """TRL GRPO calls this with batched prompts+completions; we score each.
-
-        TRL passes extra dataset columns via kwargs (instance_id, diff, reference_text).
-        Parallelized over judge calls (16 workers) — each call is ~1s on V4-Pro
-        non-thinking mode, so 32 calls = ~2s with parallelism vs ~32s serial.
-        """
-        from concurrent.futures import ThreadPoolExecutor
-
-        instance_ids = kwargs["instance_id"]
-        diffs = kwargs["diff"]
-        refs = kwargs.get("reference_text", [""] * len(prompts))
-
-        def _score_one(i: int) -> float:
-            base_sample = base_cache.get(instance_ids[i])
-            return composite_reward(diffs[i], completions[i], base_sample, refs[i])
-
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            rewards = list(executor.map(_score_one, range(len(prompts))))
-        return rewards
+    # 4. Reward function — verifiable reward against clean defect tuples (v5).
+    # Default match_fn (None) uses defect_match's DeepSeek constrained yes/no judge.
+    reward_fn = build_reward_fn(defect_labels)
 
     # 5. Build GRPO config; CoRPOTrainer extends GRPOTrainer
     output_dir = Path(args.output_dir)
@@ -353,10 +340,13 @@ def _generate_v4_rollouts(
     num_generations: int,
     max_new_tokens: int,
 ) -> list[list[str]]:
-    """vLLM-generate num_generations rollouts per prompt using base + v4 LoRA via vLLM's LoRA support.
+    """vLLM-generate num_generations RAW rollouts per prompt using base + v4 LoRA.
 
-    Returns list of length len(prompts), each containing num_generations strings.
-    Uses temperature=1.0 (CoRPO paper) for diversity.
+    Returns list of length len(prompts), each containing num_generations RAW
+    completion strings (with <think>/<review>). The variance gate scores these via
+    verifiable_reward, which extracts internally — so the gate must NOT pre-extract
+    (doing so was a double-extraction skew vs. training). Diff truncation (5000 chars)
+    and temperature=1.0 match run_training exactly for a faithful pre-flight.
 
     Lazy-imports vLLM and transformers — only invoked when running on Colab GPU.
     """
@@ -365,7 +355,6 @@ def _generate_v4_rollouts(
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
     from transformers import AutoTokenizer
-    from run_ood_eval import _extract_review
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
 
@@ -376,7 +365,7 @@ def _generate_v4_rollouts(
     for p in prompts:
         messages = [
             {"role": "system", "content": SYSTEM_MSG},
-            {"role": "user", "content": USER_TEMPLATE.format(diff=p["diff"][:12000])},
+            {"role": "user", "content": USER_TEMPLATE.format(diff=p["diff"][:5000])},
         ]
         formatted.append(tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -401,7 +390,7 @@ def _generate_v4_rollouts(
     outputs = llm.generate(formatted, sp, lora_request=lora_request)
     result: list[list[str]] = []
     for o in outputs:
-        rollouts = [_extract_review(comp.text) for comp in o.outputs]
+        rollouts = [comp.text for comp in o.outputs]  # RAW; reward extracts internally
         result.append(rollouts)
 
     del llm
@@ -418,7 +407,7 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
     """Generate 8 rollouts × 50 prompts with v4 policy; check reward spread.
 
     Generates `args.num_generations` rollouts for each of up to 50 random training
-    prompts using the v4 LoRA via vLLM, scores them with `composite_reward`, and
+    prompts using the v4 LoRA via vLLM, scores them with `verifiable_reward`, and
     inspects the within-group reward std as a signal-strength check. Also prints
     a histogram and percentile-based R_min suggestions so the operator can pick
     a calibrated `--r-min-correct` value for the actual training run.
@@ -428,7 +417,6 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
     """
     import json
     import random
-    from corpo_reward import composite_reward, load_base_sample_cache
 
     # Load 50 random train prompts
     with open(args.train_prompts) as fh:
@@ -436,7 +424,7 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
     rng = random.Random(42)
     sample = rng.sample(all_prompts, min(50, len(all_prompts)))
 
-    base_cache = load_base_sample_cache(args.base_cache)
+    defect_labels = load_defect_labels(args.defect_labels)
 
     print(f"[variance-gate] generating {len(sample)} x {args.num_generations} v4 rollouts", file=sys.stderr)
     rollouts_by_prompt = _generate_v4_rollouts(
@@ -445,20 +433,17 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
 
     from concurrent.futures import ThreadPoolExecutor
 
+    # Score the RAW rollout (verifiable_reward extracts once internally) so the gate
+    # measures exactly what training measures — no double-extraction skew.
     def _score_one(work_item):
-        i, j, prompt, rollout, base = work_item
-        return i, j, composite_reward(
-            diff=prompt["diff"],
-            rollout=rollout,
-            base_sample=base,
-            reference=prompt.get("reference_text", ""),
-        )
+        i, j, prompt, rollout = work_item
+        defects = defect_labels.get(prompt["instance_id"], [])
+        return i, j, verifiable_reward(prompt["diff"], rollout, defects)
 
     work = []
     for i, prompt in enumerate(sample):
-        base = base_cache.get(prompt["instance_id"])
         for j, rollout in enumerate(rollouts_by_prompt[i]):
-            work.append((i, j, prompt, rollout, base))
+            work.append((i, j, prompt, rollout))
 
     rewards = np.zeros((len(sample), args.num_generations))
     print(f"[variance-gate] scoring {len(work)} (prompt, rollout) pairs in parallel...", file=sys.stderr)
@@ -498,3 +483,44 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
 
 if __name__ == "__main__":
     main()
+
+def load_defect_labels(path) -> dict[str, list[dict]]:
+    """Load clean defect tuples keyed by instance_id (built by label_defects.py).
+
+    JSONL: one {"instance_id": ..., "defects": [{path,line,issue_type,canonical_desc}, ...]}
+    per line. An empty "defects" list marks a clean diff (model should find nothing).
+    """
+    import json
+    labels: dict[str, list[dict]] = {}
+    with Path(path).open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            labels[row["instance_id"]] = row.get("defects", [])
+    return labels
+
+
+def build_reward_fn(defect_labels: dict[str, list[dict]], match_fn=None):
+    """Return a TRL-compatible reward closure scoring each completion with verifiable_reward.
+
+    TRL calls reward_fn(prompts, completions, **kwargs); kwargs carries the dataset
+    columns (instance_id, diff) replicated per completion. Each completion is scored
+    against its instance's clean defect tuples (a missing instance => clean diff, []).
+    Semantic-matcher calls are parallelized (16 workers); match_fn is injectable for tests.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def reward_fn(prompts, completions, **kwargs):
+        instance_ids = kwargs["instance_id"]
+        diffs = kwargs["diff"]
+
+        def _score_one(i):
+            defects = defect_labels.get(instance_ids[i], [])
+            return verifiable_reward(diffs[i], completions[i], defects, match_fn=match_fn)
+
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            return list(ex.map(_score_one, range(len(prompts))))
+
+    return reward_fn

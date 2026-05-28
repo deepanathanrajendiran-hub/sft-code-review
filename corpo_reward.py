@@ -24,6 +24,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from run_ood_eval import _extract_review
+from defect_match import recall as _defect_recall
 
 
 def length_sanity_score(text: str) -> float:
@@ -212,3 +213,46 @@ def _build_base_cache_cli():
 
 if __name__ == "__main__":
     _build_base_cache_cli()
+
+# === v5 verifiable reward (replaces the gameable pairwise-judge composite) ===
+# R = 0.6*recall_or_restraint + 0.3*grounding(1-halluc) + 0.1*length_sanity
+# - recall_or_restraint: on labeled records, fraction of clean defect tuples caught
+#   (defect_match.recall via a semantic matcher); on CLEAN records (no labels), the
+#   grounding score itself -> full credit for NOT inventing issues (anti-hallucination).
+# - grounding: 1 - hallucination_rate vs the diff (the goal's "less hallucination" half).
+# - length: mild anti-collapse / anti-verbosity band.
+# No opponent, no quality judge -> Goodhart can't apply; verbosity earns nothing
+# because the matcher requires actually identifying the defect, not name-dropping it.
+RECALL_WEIGHT = 0.6
+GROUND_WEIGHT = 0.3
+LEN_WEIGHT = 0.1
+
+
+def recall_or_restraint(review: str, defects: list[dict], diff: str, match_fn=None) -> float:
+    """Defect recall on labeled records; grounding-as-restraint on clean records.
+
+    On a record with >=1 clean defect tuple, returns defect_match.recall (fraction
+    caught). On a clean record (no defects), returns the grounding score so the model
+    is rewarded for NOT fabricating issues — directly targeting the over-eager-caveat
+    hallucination that is v4's remaining tail.
+    """
+    if defects:
+        return _defect_recall(review, defects, match_fn=match_fn)
+    return hallucination_score(diff, review)
+
+
+def verifiable_reward(diff: str, rollout: str, defects: list[dict], match_fn=None) -> float:
+    review = _extract_review(rollout)
+    # Normalize stray <review> tags: _extract_review's fallback returns the literal
+    # "<review></review>" for an empty block — that is a deployment failure, score 0.
+    review = review.replace("<review>", "").replace("</review>", "").strip()
+    if not review or review == "...":
+        return 0.0
+    r_recall = recall_or_restraint(review, defects, diff, match_fn=match_fn)
+    r_ground = hallucination_score(diff, review)
+    r_length = length_sanity_score(review)
+    return (
+        RECALL_WEIGHT * r_recall
+        + GROUND_WEIGHT * r_ground
+        + LEN_WEIGHT * r_length
+    )
