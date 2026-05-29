@@ -28,8 +28,11 @@ from corpo_reward import verifiable_components
 
 
 def score(preds: list[dict], labels: dict[str, list[dict]], pred_field: str,
-          match_fn=None, count_fn=None) -> dict:
+          match_fn=None, count_fn=None, max_workers: int = 16) -> dict:
     """Precision-aware judge-independent scoring against clean defect labels.
+
+    Parallelized 16-wide over records (each record makes ~1 claim-count + ~1 matcher
+    call per defect; serial scoring of 632 records is ~30-60 min, parallel ~3-5 min).
 
     Returns the goal-relevant signals, separated (never a single gameable blend):
       defect_recall_labeled : caught/known on records WITH defects (the "beat v4" half)
@@ -38,12 +41,20 @@ def score(preds: list[dict], labels: dict[str, list[dict]], pred_field: str,
       halluc_mean           : backticked-identifier hallucination over all records
       reward_mean           : the composite v5 reward (what training optimizes)
     """
-    recalls, precisions, fps, hallucs, rewards = [], [], [], [], []
-    for r in preds:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(r):
         defects = labels.get(r["instance_id"], [])
         review = r.get(pred_field, "") or ""
         diff = r.get("diff", "")
-        c = verifiable_components(review, defects, diff, match_fn=match_fn, count_fn=count_fn)
+        return defects, verifiable_components(review, defects, diff,
+                                              match_fn=match_fn, count_fn=count_fn)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        scored = list(ex.map(_one, preds))
+
+    recalls, precisions, fps, hallucs, rewards = [], [], [], [], []
+    for defects, c in scored:
         rewards.append(c["reward"])
         hallucs.append(1.0 - c["grounding"])
         if defects:
@@ -89,6 +100,8 @@ def main():
         return f"{x:.3f}" if x is not None else "n/a"
 
     for field in args.pred_fields:
+        print(f"[score_v5] scoring '{field}' over {len(preds)} records (16 workers, ~3-5 min)...",
+              file=sys.stderr, flush=True)
         s = score(preds, labels, field)
         print(
             f"  {field:12s}  defect_recall={_f(s['defect_recall_labeled'])}  "
