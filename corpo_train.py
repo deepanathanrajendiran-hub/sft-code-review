@@ -498,9 +498,6 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
     return passed
 
 
-if __name__ == "__main__":
-    main()
-
 def load_defect_labels(path) -> dict[str, list[dict]]:
     """Load clean defect tuples keyed by instance_id (built by label_defects.py).
 
@@ -541,3 +538,7 @@ def build_reward_fn(defect_labels: dict[str, list[dict]], match_fn=None):
             return list(ex.map(_score_one, range(len(prompts))))
 
     return reward_fn
+
+
+if __name__ == "__main__":
+    main()
