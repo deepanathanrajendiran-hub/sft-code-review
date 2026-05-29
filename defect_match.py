@@ -18,22 +18,34 @@ def defect_caught(review: str, defect: dict, match_fn=None) -> bool:
     return bool(fn(review, defect))
 
 
-def recall(review: str, defects: list[dict], match_fn=None) -> float:
-    """Fraction of clean defect tuples the review catches.
+def caught_count(review: str, defects: list[dict], match_fn=None) -> int:
+    """Number of known defect tuples the review catches (via the semantic matcher).
 
-    Raises ValueError on an empty label set — recall over no labels is undefined,
-    and silently returning 1.0 would reward verbosity on clean diffs. The reward
-    layer (corpo_reward.recall_or_restraint) special-cases the no-label case.
-    An empty/whitespace review catches nothing and short-circuits with NO matcher
-    calls (one API call per defect is the cost driver).
+    An empty/whitespace review catches nothing and makes NO matcher calls.
     """
+    if not defects or not review or not review.strip():
+        return 0
+    fn = match_fn or _match_fn
+    return sum(1 for d in defects if fn(review, d))
+
+
+def count_claims(review: str, count_fn=None) -> int:
+    """Number of DISTINCT defects the review asserts (for the precision term).
+
+    Used to penalize over-claiming: precision = caught / claims. An empty review
+    asserts nothing and makes NO API call. count_fn is injectable for tests.
+    """
+    if not review or not review.strip():
+        return 0
+    fn = count_fn or _count_fn
+    return int(fn(review))
+
+
+
+def recall(review: str, defects: list[dict], match_fn=None) -> float:
     if not defects:
         raise ValueError("recall() over an empty defect set is undefined")
-    if not review or not review.strip():
-        return 0.0
-    fn = match_fn or _match_fn
-    caught = sum(1 for d in defects if fn(review, d))
-    return caught / len(defects)
+    return caught_count(review, defects, match_fn=match_fn) / len(defects)
 
 
 def deepseek_defect_match_judge(review: str, defect: dict) -> bool:
@@ -64,3 +76,28 @@ def deepseek_defect_match_judge(review: str, defect: dict) -> bool:
 
 # Module-level binding so tests can patch _match_fn (mirrors corpo_reward._judge_fn).
 _match_fn = deepseek_defect_match_judge
+
+def deepseek_count_claims(review: str) -> int:
+    """Count distinct asserted code defects via DeepSeek V4-Pro (thinking disabled)."""
+    from ood_metrics import _get_deepseek_client, DEEPSEEK_V4_PRO
+
+    client = _get_deepseek_client()
+    prompt = (
+        "Count the number of DISTINCT, specific code defects this review asserts "
+        "(a bug/security/correctness/perf issue the author should fix). Do NOT count "
+        "praise, questions, or general remarks. Reply with ONLY an integer.\n\n"
+        f"REVIEW:\n{review[:1500]}"
+    )
+    resp = client.chat.completions.create(
+        model=DEEPSEEK_V4_PRO,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=4,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    import re as _re
+    m = _re.search(r"\d+", resp.choices[0].message.content or "")
+    return int(m.group()) if m else 0
+
+
+# Module-level binding so tests can patch the claim-counter (mirrors _match_fn).
+_count_fn = deepseek_count_claims

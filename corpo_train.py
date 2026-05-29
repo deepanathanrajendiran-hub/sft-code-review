@@ -12,8 +12,10 @@ Usage:
     # Full training (~4-6h on Colab A100)
     python corpo_train.py [same args as above without --variance-gate-only]
 
-    # Resume from checkpoint
-    python corpo_train.py --resume /content/corpo-out/checkpoints/step_50 [other args]
+    # Resume from checkpoint. Checkpoints are HF-named `checkpoint-<N>`. After a Colab
+    # disconnect the local --output-dir is wiped; resume from the Drive mirror (the path
+    # passed to --checkpoint-sync-dir), e.g.:
+    #   python corpo_train.py --resume /content/drive/MyDrive/sft/corpo-out-v5/checkpoint-150 [other args]
 
 Safety: refuses to start if --v4-backup does not contain adapter_config.json,
 to prevent accidentally training over the only copy of v4.
@@ -235,7 +237,13 @@ def run_training(args: argparse.Namespace) -> None:
         beta=args.kl_beta,
         num_generations=args.num_generations,
         max_completion_length=args.max_new_tokens,
-        per_device_train_batch_size=args.prompts_per_step,
+        # TRL requires per_device_train_batch_size % num_generations == 0 (the device
+        # micro-batch holds one prompt's G completions). So pdtbs = num_generations
+        # (one prompt's group per micro-step) and gradient_accumulation_steps =
+        # prompts_per_step (accumulate that many prompts before an optimizer step).
+        # The old pdtbs=prompts_per_step(4) % num_generations(8) != 0 -> ValueError at init.
+        per_device_train_batch_size=args.num_generations,
+        gradient_accumulation_steps=args.prompts_per_step,
         num_train_epochs=args.epochs,
         save_steps=args.checkpoint_every,
         logging_steps=10,
@@ -327,6 +335,15 @@ def main():
             "Verify TRL is pinned at 0.22.2 (or compatible) and retry."
         )
     print("[corpo_train] pre-flight: TRL exposes loss_type ✓", file=sys.stderr)
+
+    # GRPO requires per_device_train_batch_size % num_generations == 0. run_training sets
+    # pdtbs = num_generations, so this holds structurally; gradient_accumulation_steps =
+    # prompts_per_step accumulates that many prompts per optimizer step.
+    print(
+        f"[corpo_train] pre-flight: batch ok (pdtbs=num_generations={args.num_generations}, "
+        f"grad_accum=prompts_per_step={args.prompts_per_step}) ✓",
+        file=sys.stderr,
+    )
 
     if args.variance_gate_only:
         passed = run_variance_gate(args)

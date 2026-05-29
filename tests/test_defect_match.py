@@ -60,3 +60,33 @@ def test_recall_does_not_call_matcher_when_review_empty():
         return True
     assert dm.recall("", DEFECTS, match_fn=counting_mf) == 0.0
     assert calls == []
+
+
+def test_caught_count_returns_integer_caught():
+    mf = _fake_matcher({"off-by-one in loop", "file not closed"})
+    assert dm.caught_count("...", DEFECTS, match_fn=mf) == 2
+
+
+def test_caught_count_empty_review_zero_no_calls():
+    calls = []
+    def cf(r, d):
+        calls.append(d); return True
+    assert dm.caught_count("", DEFECTS, match_fn=cf) == 0
+    assert calls == []
+
+
+def test_recall_is_caught_over_total():
+    mf = _fake_matcher({"off-by-one in loop"})
+    assert dm.recall("...", DEFECTS, match_fn=mf) == 1 / 3
+
+
+def test_count_claims_delegates_to_count_fn():
+    assert dm.count_claims("a review asserting things", count_fn=lambda r: 3) == 3
+
+
+def test_count_claims_empty_review_zero_no_call():
+    calls = []
+    def cf(r):
+        calls.append(r); return 5
+    assert dm.count_claims("", count_fn=cf) == 0
+    assert calls == []

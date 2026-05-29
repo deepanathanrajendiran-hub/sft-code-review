@@ -4,9 +4,10 @@ This is BOTH the success metric for the goal ("beat v4 with <= v4 hallucination"
 and the RL variance pre-flight precursor — it answers "does v4 have recall headroom,
 and is v5 actually better?" without any gameable quality judge.
 
-  recall_mean : mean recall_or_restraint over predictions (defect recall on labeled
-                records via the semantic matcher; grounding-as-restraint on clean ones)
-  halluc_mean : mean hallucination_rate vs the diff (the "less hallucination" half)
+  defect_recall_labeled : caught/known on records WITH defects (the "beat v4" half)
+  precision_labeled     : caught/claims on those records (anti-shotgun)
+  fp_rate_clean         : fraction of CLEAN records where the model invented a defect
+  halluc_mean           : backticked-identifier hallucination (the "less hallucination" half)
 
 CLI:
     # 1) build clean labels (needs DEEPSEEK_API_KEY)
@@ -23,33 +24,46 @@ from pathlib import Path
 
 import numpy as np
 
-from corpo_reward import recall_or_restraint
-from ood_metrics import hallucination_rate
+from corpo_reward import verifiable_components
 
 
-def score(preds: list[dict], labels: dict[str, list[dict]], pred_field: str, match_fn=None) -> dict:
-    """Aggregate recall + hallucination for one prediction field against clean labels.
+def score(preds: list[dict], labels: dict[str, list[dict]], pred_field: str,
+          match_fn=None, count_fn=None) -> dict:
+    """Precision-aware judge-independent scoring against clean defect labels.
 
-    preds: rows with instance_id, diff, and the pred_field (an extracted review string).
-    labels: instance_id -> list of clean defect tuples (missing => clean diff).
-    match_fn: semantic matcher (defect_match._match_fn default; inject in tests).
+    Returns the goal-relevant signals, separated (never a single gameable blend):
+      defect_recall_labeled : caught/known on records WITH defects (the "beat v4" half)
+      precision_labeled     : caught/claims on those records (anti-shotgun)
+      fp_rate_clean         : fraction of CLEAN records where the model invented a defect
+      halluc_mean           : backticked-identifier hallucination over all records
+      reward_mean           : the composite v5 reward (what training optimizes)
     """
-    recalls, hallucs = [], []
-    n_labeled = 0
+    recalls, precisions, fps, hallucs, rewards = [], [], [], [], []
     for r in preds:
         defects = labels.get(r["instance_id"], [])
         review = r.get(pred_field, "") or ""
         diff = r.get("diff", "")
-        recalls.append(recall_or_restraint(review, defects, diff, match_fn=match_fn))
-        hallucs.append(hallucination_rate({"diff": diff, "v4_pred": review}))
+        c = verifiable_components(review, defects, diff, match_fn=match_fn, count_fn=count_fn)
+        rewards.append(c["reward"])
+        hallucs.append(1.0 - c["grounding"])
         if defects:
-            n_labeled += 1
+            recalls.append(c["recall"])
+            precisions.append(c["precision"])
+        else:
+            fps.append(c["fp_rate"])
+
+    def _mean(xs):
+        return float(np.mean(xs)) if xs else None
+
     return {
         "pred_field": pred_field,
         "n_total": len(preds),
-        "n_labeled": n_labeled,
-        "recall_mean": float(np.mean(recalls)) if recalls else 0.0,
+        "n_labeled": len(recalls),
+        "defect_recall_labeled": _mean(recalls),
+        "precision_labeled": _mean(precisions),
+        "fp_rate_clean": _mean(fps),
         "halluc_mean": float(np.mean(hallucs)) if hallucs else 0.0,
+        "reward_mean": float(np.mean(rewards)) if rewards else 0.0,
     }
 
 
@@ -70,12 +84,19 @@ def main():
             labels[row["instance_id"]] = row.get("defects", [])
 
     print(f"[score_v5] {len(preds)} preds; labels for {len(labels)} instances", file=sys.stderr)
+
+    def _f(x):
+        return f"{x:.3f}" if x is not None else "n/a"
+
     for field in args.pred_fields:
         s = score(preds, labels, field)
         print(
-            f"  {field:12s}  recall={s['recall_mean']:.3f}  halluc={s['halluc_mean']:.3f}  "
+            f"  {field:12s}  defect_recall={_f(s['defect_recall_labeled'])}  "
+            f"precision={_f(s['precision_labeled'])}  fp_rate(clean)={_f(s['fp_rate_clean'])}  "
+            f"halluc={s['halluc_mean']:.3f}  reward={s['reward_mean']:.3f}  "
             f"(labeled {s['n_labeled']}/{s['n_total']})"
         )
+    print("\nGOAL: v5 beats v4 iff defect_recall UP and (fp_rate, halluc) NOT worse than v4.")
 
 
 if __name__ == "__main__":

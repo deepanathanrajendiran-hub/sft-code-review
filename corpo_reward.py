@@ -24,7 +24,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from run_ood_eval import _extract_review
-from defect_match import recall as _defect_recall
+from defect_match import caught_count, count_claims
 
 
 def length_sanity_score(text: str) -> float:
@@ -214,45 +214,72 @@ def _build_base_cache_cli():
 if __name__ == "__main__":
     _build_base_cache_cli()
 
-# === v5 verifiable reward (replaces the gameable pairwise-judge composite) ===
-# R = 0.6*recall_or_restraint + 0.3*grounding(1-halluc) + 0.1*length_sanity
-# - recall_or_restraint: on labeled records, fraction of clean defect tuples caught
-#   (defect_match.recall via a semantic matcher); on CLEAN records (no labels), the
-#   grounding score itself -> full credit for NOT inventing issues (anti-hallucination).
+# === v5 PRECISION-AWARE verifiable reward (replaces the gameable pairwise-judge composite) ===
+# R = 0.6*quality + 0.3*grounding(1-halluc) + 0.1*length_sanity   (see verifiable_components)
+# - quality on a LABELED record = F1(recall, precision): recall = caught/known defects,
+#   precision = caught/claims -> over-claiming (shotgun) LOWERS the score.
+# - quality on a CLEAN record  = 1/(1+claims): any invented defect LOWERS the score.
 # - grounding: 1 - hallucination_rate vs the diff (the goal's "less hallucination" half).
 # - length: mild anti-collapse / anti-verbosity band.
-# No opponent, no quality judge -> Goodhart can't apply; verbosity earns nothing
-# because the matcher requires actually identifying the defect, not name-dropping it.
-RECALL_WEIGHT = 0.6
+# No opponent, no quality judge -> Goodhart can't apply; verbosity/over-claiming is
+# penalized by the precision term, so the reward pushes recall UP and hallucination DOWN.
+RECALL_WEIGHT = 0.6   # weight on `quality` (F1 on labeled, restraint on clean)
 GROUND_WEIGHT = 0.3
 LEN_WEIGHT = 0.1
 
 
-def recall_or_restraint(review: str, defects: list[dict], diff: str, match_fn=None) -> float:
-    """Defect recall on labeled records; grounding-as-restraint on clean records.
 
-    On a record with >=1 clean defect tuple, returns defect_match.recall (fraction
-    caught). On a clean record (no defects), returns the grounding score so the model
-    is rewarded for NOT fabricating issues — directly targeting the over-eager-caveat
-    hallucination that is v4's remaining tail.
+
+def _f1(recall: float, precision: float) -> float:
+    if recall + precision <= 0:
+        return 0.0
+    return 2 * recall * precision / (recall + precision)
+
+
+def verifiable_components(
+    review: str, defects: list[dict], diff: str, match_fn=None, count_fn=None
+) -> dict:
+    """Precision-aware components of the v5 reward (shared by reward + eval).
+
+    Closes the shotgun/over-claim hole: naming more issues raises `n_claims`, which
+    lowers precision on labeled records and the restraint score on clean ones — so a
+    false positive always COSTS reward (the goal's anti-hallucination half).
+
+      labeled record: quality = F1(recall, precision), precision = caught / n_claims
+      clean record:   quality = 1 / (1 + n_claims)   (any asserted defect is a false positive)
+      reward = 0.6*quality + 0.3*grounding(1-halluc) + 0.1*length
     """
+    n_claims = count_claims(review, count_fn=count_fn)
+    grounding = hallucination_score(diff, review)
+    length = length_sanity_score(review)
     if defects:
-        return _defect_recall(review, defects, match_fn=match_fn)
-    return hallucination_score(diff, review)
+        caught = caught_count(review, defects, match_fn=match_fn)
+        recall = caught / len(defects)
+        precision = min(1.0, caught / n_claims) if n_claims > 0 else 0.0
+        quality = _f1(recall, precision)
+        fp_rate = None
+    else:
+        caught = None
+        recall = None
+        precision = None
+        quality = 1.0 / (1.0 + n_claims)  # clean diff: penalize invented defects
+        fp_rate = 1.0 if n_claims > 0 else 0.0
+    reward = RECALL_WEIGHT * quality + GROUND_WEIGHT * grounding + LEN_WEIGHT * length
+    return {
+        "n_claims": n_claims, "caught": caught, "recall": recall, "precision": precision,
+        "quality": quality, "grounding": grounding, "length": length,
+        "fp_rate": fp_rate, "reward": reward,
+    }
 
 
-def verifiable_reward(diff: str, rollout: str, defects: list[dict], match_fn=None) -> float:
+
+def verifiable_reward(diff: str, rollout: str, defects: list[dict], match_fn=None, count_fn=None) -> float:
     review = _extract_review(rollout)
     # Normalize stray <review> tags: _extract_review's fallback returns the literal
     # "<review></review>" for an empty block — that is a deployment failure, score 0.
     review = review.replace("<review>", "").replace("</review>", "").strip()
     if not review or review == "...":
         return 0.0
-    r_recall = recall_or_restraint(review, defects, diff, match_fn=match_fn)
-    r_ground = hallucination_score(diff, review)
-    r_length = length_sanity_score(review)
-    return (
-        RECALL_WEIGHT * r_recall
-        + GROUND_WEIGHT * r_ground
-        + LEN_WEIGHT * r_length
-    )
+    return verifiable_components(
+        review, defects, diff, match_fn=match_fn, count_fn=count_fn
+    )["reward"]
