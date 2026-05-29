@@ -8,7 +8,8 @@ from ood_metrics import (
     bootstrap_winrate_ci,
 )
 from ood_metrics import hit_rate, hit_rate_strict, hallucination_rate, STOPWORDS
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
+import os
 
 
 class TestExtractLocations:
@@ -288,3 +289,160 @@ class TestBootstrapWinrateCi:
         mean, lo, hi = bootstrap_winrate_ci(verdicts, which="A", n_iter=500)
         assert abs(mean - 0.5) < 0.01
         assert lo < 0.5 < hi
+
+
+class TestDeepSeekV4FlashJudge:
+    def test_returns_a_when_no_swap_and_model_says_a(self, sample_diff):
+        """random < 0.5 → no swap; model says 'A' → return 'A' unchanged."""
+        with patch("ood_metrics.random.random", return_value=0.4), \
+             patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="A"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4flash_pairwise_judge
+            verdict = deepseek_v4flash_pairwise_judge(
+                review_a="good review",
+                review_b="bad review",
+                diff=sample_diff,
+                reference="ref",
+            )
+            assert verdict == "A"
+
+    def test_returns_b_when_swap_and_model_says_a(self, sample_diff):
+        """random > 0.5 → swap (B becomes A internally); model says 'A' → flip back to 'B'."""
+        with patch("ood_metrics.random.random", return_value=0.6), \
+             patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="A"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4flash_pairwise_judge
+            verdict = deepseek_v4flash_pairwise_judge(
+                review_a="good review",
+                review_b="bad review",
+                diff=sample_diff,
+                reference="ref",
+            )
+            assert verdict == "B"
+
+    def test_returns_tie_on_garbage(self, sample_diff):
+        with patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="???"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4flash_pairwise_judge
+            verdict = deepseek_v4flash_pairwise_judge("x", "y", sample_diff, "")
+            assert verdict == "TIE"
+
+    def test_client_uses_env_var(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        # Reset module-level client cache
+        import ood_metrics
+        ood_metrics._deepseek_client = None
+        with patch("openai.OpenAI") as openai_ctor:
+            ood_metrics._get_deepseek_client()
+            openai_ctor.assert_called_once()
+            kwargs = openai_ctor.call_args.kwargs
+            assert kwargs["api_key"] == "sk-test"
+            assert "deepseek" in kwargs["base_url"].lower()
+
+
+class TestDeepSeekV4ProJudge3Vote:
+    def test_majority_a(self, sample_diff):
+        with patch("ood_metrics.deepseek_v4pro_pairwise_judge") as one_vote:
+            one_vote.side_effect = ["A", "A", "B"]
+            from ood_metrics import deepseek_v4pro_pairwise_judge_3vote
+            verdict = deepseek_v4pro_pairwise_judge_3vote("x", "y", sample_diff, "ref")
+            assert verdict == "A"
+
+    def test_no_majority_returns_tie(self, sample_diff):
+        with patch("ood_metrics.deepseek_v4pro_pairwise_judge") as one_vote:
+            one_vote.side_effect = ["A", "B", "TIE"]
+            from ood_metrics import deepseek_v4pro_pairwise_judge_3vote
+            verdict = deepseek_v4pro_pairwise_judge_3vote("x", "y", sample_diff, "ref")
+            assert verdict == "TIE"
+
+    def test_single_call_uses_v4pro_model(self, sample_diff):
+        with patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="A"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4pro_pairwise_judge, DEEPSEEK_V4_PRO
+            deepseek_v4pro_pairwise_judge("x", "y", sample_diff, "ref")
+            kwargs = mock.chat.completions.create.call_args.kwargs
+            assert kwargs["model"] == DEEPSEEK_V4_PRO
+
+
+class TestThinkingDisabled:
+    def test_v4flash_sends_thinking_disabled(self, sample_diff):
+        with patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="A"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4flash_pairwise_judge
+            deepseek_v4flash_pairwise_judge("x", "y", sample_diff, "ref")
+            kwargs = mock.chat.completions.create.call_args.kwargs
+            assert kwargs.get("extra_body") == {"thinking": {"type": "disabled"}}
+
+    def test_v4pro_sends_thinking_disabled(self, sample_diff):
+        with patch("ood_metrics._get_deepseek_client") as get_client:
+            mock = MagicMock()
+            mock.chat.completions.create.return_value.choices = [
+                MagicMock(message=MagicMock(content="A"))
+            ]
+            get_client.return_value = mock
+            from ood_metrics import deepseek_v4pro_pairwise_judge
+            deepseek_v4pro_pairwise_judge("x", "y", sample_diff, "ref")
+            kwargs = mock.chat.completions.create.call_args.kwargs
+            assert kwargs.get("extra_body") == {"thinking": {"type": "disabled"}}
+
+
+class TestJudgeSelectionFlag:
+    def test_judge_arg_defaults_to_v4pro3vote(self):
+        from ood_metrics import _resolve_judge_fn
+        fn = _resolve_judge_fn("v4pro3vote")
+        from ood_metrics import deepseek_v4pro_pairwise_judge_3vote
+        assert fn is deepseek_v4pro_pairwise_judge_3vote
+
+    def test_judge_arg_v4flash(self):
+        from ood_metrics import _resolve_judge_fn, deepseek_v4flash_pairwise_judge
+        assert _resolve_judge_fn("v4flash") is deepseek_v4flash_pairwise_judge
+
+    def test_judge_arg_haiku(self):
+        from ood_metrics import _resolve_judge_fn, haiku_pairwise_judge_3vote
+        assert _resolve_judge_fn("haiku") is haiku_pairwise_judge_3vote
+
+    def test_judge_arg_unknown_raises(self):
+        from ood_metrics import _resolve_judge_fn
+        with pytest.raises(ValueError, match="unknown judge"):
+            _resolve_judge_fn("nonsense")
+
+
+class TestPredFieldFlags:
+    def test_field_flags_in_argparser(self):
+        from ood_metrics import _build_arg_parser
+        p = _build_arg_parser()
+        args = p.parse_args([
+            "--preds", "x.jsonl",
+            "--labels", "y.jsonl",
+            "--pred-a-field", "v4corpo_pred",
+            "--pred-b-field", "v4_pred",
+        ])
+        assert args.pred_a_field == "v4corpo_pred"
+        assert args.pred_b_field == "v4_pred"
+
+    def test_field_defaults_backward_compat(self):
+        from ood_metrics import _build_arg_parser
+        p = _build_arg_parser()
+        args = p.parse_args(["--preds", "x.jsonl", "--labels", "y.jsonl"])
+        assert args.pred_a_field == "v4_pred"
+        assert args.pred_b_field == "base_pred"

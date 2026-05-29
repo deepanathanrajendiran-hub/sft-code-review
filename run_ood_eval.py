@@ -1,11 +1,13 @@
-"""Sequential vLLM inference: v4 first, then base, on a JSONL of diffs.
+"""OOD evaluation runner for code-review LoRAs.
 
-Loads each model in turn, generates with production sampling
-(temp=0, max_tokens=4096, repetition_penalty=1.1), applies _extract_review
-post-process, and writes per-row predictions.
+Primary use: invoke as a CLI script via `python run_ood_eval.py ...` to
+generate predictions and compute metrics on the SWE-CARE eval set.
 
-Must be invoked as `python run_ood_eval.py …` (not imported) — vLLM v1's
-multiprocessing requires a main-guard.
+The module is also safe to import — specifically, `_extract_review` is
+used by `corpo_reward.py` as a library helper for reward-time review
+extraction. Heavy dependencies (vLLM, transformers) are imported inside
+function bodies, not at module load, so importing this file has no side
+effects beyond stdlib imports.
 """
 from __future__ import annotations
 
@@ -111,6 +113,13 @@ def main():
     ap.add_argument("--v4-model", required=True)
     ap.add_argument("--base-model", default="unsloth/Qwen2.5-Coder-7B-Instruct")
     ap.add_argument("--limit", type=int, default=None, help="Smoke-test on first N rows")
+    ap.add_argument(
+        "--skip-base",
+        action="store_true",
+        default=False,
+        help="Skip base-model generation (e.g. when base preds already cached). "
+             "Writes base_pred as empty string for each row to preserve column shape.",
+    )
     args = ap.parse_args()
 
     rows: list[dict] = []
@@ -123,7 +132,10 @@ def main():
     if args.limit is not None:
         rows = rows[: args.limit]
 
-    print(f"[run_ood_eval] {len(rows)} rows; generating v4 then base", flush=True)
+    if args.skip_base:
+        print(f"[run_ood_eval] {len(rows)} rows; generating v4 only (--skip-base)", flush=True)
+    else:
+        print(f"[run_ood_eval] {len(rows)} rows; generating v4 then base", flush=True)
     diffs = [row["diff"] for row in rows]
 
     from transformers import AutoTokenizer
@@ -143,10 +155,14 @@ def main():
     v4_raw = _generate(args.v4_model, diffs, tokenizer)
     v4_extracted = [_extract_review(t) for t in v4_raw]
 
-    print(f"[run_ood_eval] loading base ({args.base_model})", flush=True)
-    base_raw = _generate(args.base_model, diffs, tokenizer)
-    # base doesn't emit <think>/<review>; pass through stripped
-    base_extracted = [_extract_review(t) if "<review>" in t else t.strip() for t in base_raw]
+    if not args.skip_base:
+        print(f"[run_ood_eval] loading base ({args.base_model})", flush=True)
+        base_raw = _generate(args.base_model, diffs, tokenizer)
+        # base doesn't emit <think>/<review>; pass through stripped
+        base_extracted = [_extract_review(t) if "<review>" in t else t.strip() for t in base_raw]
+    else:
+        print(f"[run_ood_eval] --skip-base set; base_pred will be empty strings", flush=True)
+        base_extracted = [""] * len(rows)
 
     out_path = Path(args.output)
     with out_path.open("w") as fh:

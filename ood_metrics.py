@@ -4,7 +4,9 @@ Pure-Python; no GPU required. Importable from notebooks or callable as CLI.
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -384,6 +386,48 @@ def _groupby_avg(preds, labels_by_instance, metric_fn, key_field) -> dict[str, f
     return {k: sum(v) / len(v) for k, v in groups.items()}
 
 
+# ---- pairwise helpers (shared across judge models) ----
+
+
+def _build_pairwise_prompt(diff: str, reference: str, ra: str, rb: str) -> str:
+    """The exact prompt text used by every pairwise judge in this module.
+
+    Truncations: diff[:2000], reference[:500], ra[:500], rb[:500].
+    """
+    return (
+        "Compare two code reviews for the same diff. Which is better?\n\n"
+        f"DIFF:\n{diff[:2000]}\n\n"
+        f"REFERENCE (expert review):\n{reference[:500]}\n\n"
+        f"REVIEW A:\n{ra[:500]}\n\n"
+        f"REVIEW B:\n{rb[:500]}\n\n"
+        "Criteria: accuracy, actionability, specificity, relevance.\n"
+        "Reply ONLY: A, B, or TIE"
+    )
+
+
+def _parse_pairwise_result(raw: str, swap: bool) -> str:
+    """Parse judge model output to 'A'/'B'/'TIE', undoing the A/B swap.
+
+    swap=True means the call was made with sides swapped, so an "A" output
+    actually refers to what the caller passed as B.
+    """
+    result = raw.strip().upper()
+    if "TIE" in result:
+        result = "TIE"
+    elif "A" in result and "B" not in result:
+        result = "A"
+    elif "B" in result and "A" not in result:
+        result = "B"
+    else:
+        result = "TIE"
+    if swap:
+        if result == "A":
+            result = "B"
+        elif result == "B":
+            result = "A"
+    return result
+
+
 # ---- pairwise (Haiku 3-vote majority — production judge, matches eval.ipynb Cell 6) ----
 
 HAIKU_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
@@ -403,11 +447,6 @@ def _get_judge_client():
     return _judge_client
 
 
-
-
-# ---- CLI ----
-
-
 def haiku_pairwise_judge(review_a: str, review_b: str, diff: str, reference: str) -> str:
     """One call. Randomized A/B order. Returns 'A', 'B', or 'TIE'."""
     swap = random.random() > 0.5
@@ -416,34 +455,97 @@ def haiku_pairwise_judge(review_a: str, review_b: str, diff: str, reference: str
     resp = _get_judge_client().messages.create(
         model=HAIKU_MODEL,
         max_tokens=4,
-        messages=[{"role": "user", "content": (
-            "Compare two code reviews for the same diff. Which is better?\n\n"
-            f"DIFF:\n{diff[:2000]}\n\n"
-            f"REFERENCE (expert review):\n{reference[:500]}\n\n"
-            f"REVIEW A:\n{ra[:500]}\n\n"
-            f"REVIEW B:\n{rb[:500]}\n\n"
-            "Criteria: accuracy, actionability, specificity, relevance.\n"
-            "Reply ONLY: A, B, or TIE"
-        )}],
+        messages=[{"role": "user", "content": _build_pairwise_prompt(diff, reference, ra, rb)}],
     )
-    result = resp.content[0].text.strip().upper()
-    if "TIE" in result:
-        result = "TIE"
-    elif "A" in result and "B" not in result:
-        result = "A"
-    elif "B" in result and "A" not in result:
-        result = "B"
-    else:
-        result = "TIE"
-    if swap:
-        if result == "A": result = "B"
-        elif result == "B": result = "A"
-    return result
+    return _parse_pairwise_result(resp.content[0].text, swap)
 
 
 def haiku_pairwise_judge_3vote(review_a: str, review_b: str, diff: str, reference: str) -> str:
     """3-vote majority. Returns 'A', 'B', or 'TIE'."""
     votes = [haiku_pairwise_judge(review_a, review_b, diff, reference) for _ in range(3)]
+    c = Counter(votes)
+    top_label, top_count = c.most_common(1)[0]
+    return top_label if top_count >= 2 else "TIE"
+
+
+# ---- pairwise (DeepSeek V4-Flash + V4-Pro) ----
+
+DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+DEEPSEEK_V4_PRO = "deepseek-v4-pro"
+
+_deepseek_client = None
+_deepseek_client_lock = threading.Lock()
+
+
+def _get_deepseek_client():
+    """Return cached OpenAI-compatible client pointed at DeepSeek API."""
+    global _deepseek_client
+    if _deepseek_client is None:
+        with _deepseek_client_lock:
+            if _deepseek_client is None:
+                import openai
+                api_key = os.environ.get("DEEPSEEK_API_KEY")
+                if not api_key:
+                    raise RuntimeError(
+                        "DEEPSEEK_API_KEY env var required for DeepSeek judge"
+                    )
+                _deepseek_client = openai.OpenAI(
+                    api_key=api_key,
+                    base_url="https://api.deepseek.com",
+                )
+    return _deepseek_client
+
+
+def _deepseek_pairwise_judge(
+    model: str, review_a: str, review_b: str, diff: str, reference: str
+) -> str:
+    """Shared implementation: one-call binary judge against a DeepSeek model.
+
+    Thinking mode disabled — for binary verdicts we don't need the reasoning
+    overhead. Drops per-call latency ~3× vs default. See:
+    https://api-docs.deepseek.com/guides/thinking_mode
+    """
+    swap = random.random() > 0.5
+    ra, rb = (review_b, review_a) if swap else (review_a, review_b)
+    client = _get_deepseek_client()
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=4,
+        messages=[{"role": "user", "content": _build_pairwise_prompt(diff, reference, ra, rb)}],
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    return _parse_pairwise_result(resp.choices[0].message.content, swap)
+
+
+def deepseek_v4flash_pairwise_judge(
+    review_a: str, review_b: str, diff: str, reference: str
+) -> str:
+    """One call. Randomized A/B order. Returns 'A', 'B', or 'TIE'.
+
+    Cheap judge for CoRPO training rollouts (not eval). Mirrors haiku_pairwise_judge
+    prompt + truncations for protocol parity.
+    """
+    return _deepseek_pairwise_judge(DEEPSEEK_V4_FLASH, review_a, review_b, diff, reference)
+
+
+def deepseek_v4pro_pairwise_judge(
+    review_a: str, review_b: str, diff: str, reference: str
+) -> str:
+    """One call against V4-Pro (higher quality, slower). Returns 'A', 'B', or 'TIE'.
+
+    Used by eval (not training); training uses the cheaper V4-Flash judge.
+    """
+    return _deepseek_pairwise_judge(DEEPSEEK_V4_PRO, review_a, review_b, diff, reference)
+
+
+def deepseek_v4pro_pairwise_judge_3vote(
+    review_a: str, review_b: str, diff: str, reference: str
+) -> str:
+    """3-vote majority. Returns 'A', 'B', or 'TIE' (TIE if no >=2 majority)."""
+    votes = [
+        deepseek_v4pro_pairwise_judge(review_a, review_b, diff, reference)
+        for _ in range(3)
+    ]
     c = Counter(votes)
     top_label, top_count = c.most_common(1)[0]
     return top_label if top_count >= 2 else "TIE"
@@ -463,19 +565,50 @@ def bootstrap_winrate_ci(verdicts: list[str], which: str = "A", n_iter: int = 20
     return float(indicator.mean()), lo, hi
 
 
+_JUDGES = {
+    "v4pro3vote": deepseek_v4pro_pairwise_judge_3vote,
+    "v4flash": deepseek_v4flash_pairwise_judge,
+    "haiku": haiku_pairwise_judge_3vote,
+}
+
+def _resolve_judge_fn(name: str):
+    """Map a --judge flag value to the corresponding judge function."""
+    try:
+        return _JUDGES[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown judge: {name!r} (expected: {', '.join(_JUDGES)})"
+        ) from None
+
+
 def pairwise_win(
     preds: list[dict],
     api_key: str = "",  # ignored; AnthropicBedrock uses AWS credentials
-    n_votes: int = 3,  # ignored; haiku_pairwise_judge_3vote hardcodes 3
+    n_votes: int = 3,  # ignored; vote count is baked into judge_fn (V4-Flash: 1, V4-Pro/Haiku: 3)
     max_workers: int = 16,
+    judge_fn=None,
+    pred_a_field: str = "v4_pred",
+    pred_b_field: str = "base_pred",
 ) -> dict:
-    """3-vote majority pairwise: v4_pred (A) vs base_pred (B) with order swap and
-    reference review. Returns aggregate dict including bootstrap 95% CI.
+    """3-vote majority pairwise: side-A (default v4_pred) vs side-B (default base_pred)
+    with order swap and reference review. Returns aggregate dict including bootstrap
+    95% CI.
+
+    judge_fn defaults to haiku_pairwise_judge_3vote for backward compat with
+    library callers; CLI callers select a judge via the --judge flag (defaults
+    to v4pro3vote there).
+
+    pred_a_field / pred_b_field let callers compare arbitrary JSONL columns
+    (e.g. v4corpo_pred vs v4_pred for CoRPO eval); defaults preserve the
+    historical v4_pred vs base_pred behaviour.
     """
+    if judge_fn is None:
+        judge_fn = haiku_pairwise_judge_3vote
+
     def _vote_one(pred):
-        return haiku_pairwise_judge_3vote(
-            review_a=pred["v4_pred"],
-            review_b=pred["base_pred"],
+        return judge_fn(
+            review_a=pred[pred_a_field],
+            review_b=pred[pred_b_field],
             diff=pred.get("diff", ""),
             reference=pred.get("reference_text", ""),
         )
@@ -503,6 +636,8 @@ def pairwise_win(
     }
 
 
+# ---- CLI ----
+
 def _load_jsonl(path: Path | str) -> list[dict]:
     rows: list[dict] = []
     with Path(path).open() as fh:
@@ -513,10 +648,8 @@ def _load_jsonl(path: Path | str) -> list[dict]:
     return rows
 
 
-def main():
-    import argparse
-    import os
-
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser. Extracted from main() for testability."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--preds", required=True, help="ood_preds.jsonl")
     ap.add_argument("--labels", required=True, help="ood_input.jsonl")
@@ -532,7 +665,28 @@ def main():
         action="store_true",
         help="Skip dual-scoring base_pred (loses base calibration but slightly faster)",
     )
-    args = ap.parse_args()
+    ap.add_argument(
+        "--judge",
+        choices=list(_JUDGES),
+        default="v4pro3vote",
+        help="Pairwise judge family: v4pro3vote (default), v4flash (cheap binary), haiku (Bedrock cross-check)",
+    )
+    ap.add_argument(
+        "--pred-a-field",
+        default="v4_pred",
+        help="JSONL field holding side-A prediction (default: v4_pred)",
+    )
+    ap.add_argument(
+        "--pred-b-field",
+        default="base_pred",
+        help="JSONL field holding side-B prediction (default: base_pred)",
+    )
+    return ap
+
+
+
+def main():
+    args = _build_arg_parser().parse_args()
 
     preds = _load_jsonl(args.preds)
     inputs = _load_jsonl(args.labels)
@@ -573,7 +727,13 @@ def main():
         results["base"] = _score(preds, "base_pred")
 
     if not args.skip_pairwise:
-        results["pairwise"] = pairwise_win(preds, args.api_key)
+        results["pairwise"] = pairwise_win(
+            preds,
+            args.api_key,
+            judge_fn=_resolve_judge_fn(args.judge),
+            pred_a_field=args.pred_a_field,
+            pred_b_field=args.pred_b_field,
+        )
 
     Path(args.output).write_text(json.dumps(results, indent=2))
     print(f"[ood_metrics] wrote {args.output}")
