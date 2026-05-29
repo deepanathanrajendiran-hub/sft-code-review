@@ -223,32 +223,31 @@ if __name__ == "__main__":
 # - length: mild anti-collapse / anti-verbosity band.
 # No opponent, no quality judge -> Goodhart can't apply; verbosity/over-claiming is
 # penalized by the precision term, so the reward pushes recall UP and hallucination DOWN.
-RECALL_WEIGHT = 0.6   # weight on `quality` (F1 on labeled, restraint on clean)
+RECALL_WEIGHT = 0.6   # weight on `quality` (F-beta on labeled, restraint on clean)
 GROUND_WEIGHT = 0.3
 LEN_WEIGHT = 0.1
 
+# v5.1 rebalance (after checkpoint-75 cut fp_rate 0.775->0.730 BUT also recall 0.094->0.070 —
+# the model got globally quieter). Favor recall so catching real defects outweighs the
+# clean-diff "be silent" pull, and soften the clean penalty so 1-2 minor notes aren't crushed.
+RECALL_BETA = 2.0          # F-beta: recall weighted beta^2=4x precision on labeled records
+CLEAN_CLAIM_PENALTY = 0.25  # clean-record quality = max(0, 1 - 0.25*claims) (was 1/(1+claims), too steep)
 
 
 
-def _f1(recall: float, precision: float) -> float:
-    if recall + precision <= 0:
+
+def _fbeta(recall: float, precision: float, beta: float = 1.0) -> float:
+    """F-beta of recall & precision. beta>1 favors recall (beta^2 x weight)."""
+    b2 = beta * beta
+    denom = b2 * precision + recall
+    if denom <= 0:
         return 0.0
-    return 2 * recall * precision / (recall + precision)
+    return (1.0 + b2) * precision * recall / denom
 
 
 def verifiable_components(
     review: str, defects: list[dict], diff: str, match_fn=None, count_fn=None
 ) -> dict:
-    """Precision-aware components of the v5 reward (shared by reward + eval).
-
-    Closes the shotgun/over-claim hole: naming more issues raises `n_claims`, which
-    lowers precision on labeled records and the restraint score on clean ones — so a
-    false positive always COSTS reward (the goal's anti-hallucination half).
-
-      labeled record: quality = F1(recall, precision), precision = caught / n_claims
-      clean record:   quality = 1 / (1 + n_claims)   (any asserted defect is a false positive)
-      reward = 0.6*quality + 0.3*grounding(1-halluc) + 0.1*length
-    """
     n_claims = count_claims(review, count_fn=count_fn)
     grounding = hallucination_score(diff, review)
     length = length_sanity_score(review)
@@ -256,13 +255,13 @@ def verifiable_components(
         caught = caught_count(review, defects, match_fn=match_fn)
         recall = caught / len(defects)
         precision = min(1.0, caught / n_claims) if n_claims > 0 else 0.0
-        quality = _f1(recall, precision)
+        quality = _fbeta(recall, precision, RECALL_BETA)   # recall-favoring (v5.1)
         fp_rate = None
     else:
         caught = None
         recall = None
         precision = None
-        quality = 1.0 / (1.0 + n_claims)  # clean diff: penalize invented defects
+        quality = max(0.0, 1.0 - CLEAN_CLAIM_PENALTY * n_claims)  # gentler than 1/(1+claims)
         fp_rate = 1.0 if n_claims > 0 else 0.0
     reward = RECALL_WEIGHT * quality + GROUND_WEIGHT * grounding + LEN_WEIGHT * length
     return {

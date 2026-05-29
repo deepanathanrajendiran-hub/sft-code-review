@@ -44,7 +44,8 @@ def test_labeled_honest_catch_scores_high(sample_diff):
 
 
 def test_labeled_shotgun_scores_lower_than_honest(sample_diff):
-    # SAME catches (both) but claims 6 -> precision=2/6=0.333, F1=0.5 -> reward must drop
+    # SAME catches (both) but claims 6 -> precision=2/6=0.333. F2 (recall-favoring) still
+    # penalizes over-claiming, but more gently than F1 (we WANT recall favored).
     honest = cr.verifiable_reward(sample_diff, _review(GROUNDED_BODY), DEFECTS,
                                   match_fn=_matcher({d["canonical_desc"] for d in DEFECTS}),
                                   count_fn=_claims(2))
@@ -52,8 +53,8 @@ def test_labeled_shotgun_scores_lower_than_honest(sample_diff):
                                    match_fn=_matcher({d["canonical_desc"] for d in DEFECTS}),
                                    count_fn=_claims(6))
     assert shotgun < honest
-    # F1(recall=1, precision=2/6) = 0.5 -> 0.6*0.5 + 0.3 + 0.1 = 0.7
-    assert abs(shotgun - 0.7) < 1e-9
+    # F2(recall=1, precision=2/6=0.333) = 5*0.333/(4*0.333+1) = 0.7143 -> 0.6*0.7143 + 0.3 + 0.1 = 0.8286
+    assert abs(shotgun - 0.8286) < 1e-3
 
 
 def test_labeled_miss_all_low(sample_diff):
@@ -71,14 +72,26 @@ def test_clean_no_claims_scores_high(sample_diff):
 
 
 def test_clean_invented_defects_punished(sample_diff):
-    # clean record, review invents 4 defects -> quality = 1/5 = 0.2 (false positives cost reward)
+    # clean record: gentler linear penalty (1 - 0.25*claims) so 1-2 minor notes aren't crushed,
+    # but invented defects still cost reward.
     clean_quiet = cr.verifiable_reward(sample_diff, _review(GROUNDED_BODY), [],
                                        match_fn=_matcher(set()), count_fn=_claims(0))
     clean_shotgun = cr.verifiable_reward(sample_diff, _review(GROUNDED_BODY), [],
-                                         match_fn=_matcher(set()), count_fn=_claims(4))
+                                         match_fn=_matcher(set()), count_fn=_claims(2))
     assert clean_shotgun < clean_quiet
-    # 0.6*(1/5) + 0.3*1 + 0.1*1 = 0.52
-    assert abs(clean_shotgun - 0.52) < 1e-9
+    # quality = 1 - 0.25*2 = 0.5 -> 0.6*0.5 + 0.3*1 + 0.1*1 = 0.7
+    assert abs(clean_shotgun - 0.7) < 1e-9
+
+
+def test_reward_favors_recall_over_precision(sample_diff):
+    # 1 defect, caught, but 3 claims -> recall=1.0, precision=1/3. F2 should reward this
+    # MORE than plain F1 would (0.5), because recall is favored 4x.
+    c = cr.verifiable_components(GROUNDED_BODY, DEFECTS[:1], sample_diff,
+                                 match_fn=_matcher({DEFECTS[0]["canonical_desc"]}), count_fn=_claims(3))
+    assert abs(c["recall"] - 1.0) < 1e-9
+    assert abs(c["precision"] - (1 / 3)) < 1e-9
+    # F2(1, 1/3) = 5*(1/3)/(4*(1/3)+1) = 0.7143  (> F1 of 0.5)
+    assert abs(c["quality"] - 0.7143) < 1e-3
 
 
 def test_components_exposed_for_eval(sample_diff):
