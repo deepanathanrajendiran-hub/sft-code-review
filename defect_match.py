@@ -1,13 +1,12 @@
-"""Semantic 'was this defect caught' matcher + recall, for the v5 verifiable reward.
+"""Semantic "was this defect caught" matcher and recall for the verifiable reward.
 
-The recall reward (v5) replaces the gameable pairwise-LLM-judge of Runs #1-#3.
-A clean defect tuple is {path, line, issue_type, canonical_desc} extracted from the
-human PR review thread by label_defects.py. `recall` asks, per defect, whether the
-model's review *identifies that specific defect* — a constrained, grounded yes/no
-judgment, far less gameable than 'which review is better'.
+A clean defect tuple is {path, line, issue_type, canonical_desc} extracted from a
+human PR review thread. `recall` asks, per defect, whether the model's review
+identifies that specific defect — a constrained, grounded yes/no judgment rather
+than the looser "which review is better".
 
-The matcher (`match_fn`) is injectable so the aggregation logic is unit-tested with
-no API call. The default `_match_fn` is the DeepSeek constrained yes/no judge.
+The matcher (`match_fn`) is injectable so the aggregation logic can be unit-tested
+with no API call. The default `_match_fn` is the DeepSeek constrained yes/no judge.
 """
 from __future__ import annotations
 
@@ -19,9 +18,9 @@ def defect_caught(review: str, defect: dict, match_fn=None) -> bool:
 
 
 def caught_count(review: str, defects: list[dict], match_fn=None) -> int:
-    """Number of known defect tuples the review catches (via the semantic matcher).
+    """Number of known defect tuples the review catches.
 
-    An empty/whitespace review catches nothing and makes NO matcher calls.
+    An empty/whitespace review catches nothing and makes no matcher calls.
     """
     if not defects or not review or not review.strip():
         return 0
@@ -30,16 +29,15 @@ def caught_count(review: str, defects: list[dict], match_fn=None) -> int:
 
 
 def count_claims(review: str, count_fn=None) -> int:
-    """Number of DISTINCT defects the review asserts (for the precision term).
+    """Number of distinct defects the review asserts, for the precision term.
 
     Used to penalize over-claiming: precision = caught / claims. An empty review
-    asserts nothing and makes NO API call. count_fn is injectable for tests.
+    asserts nothing and makes no API call. count_fn is injectable for tests.
     """
     if not review or not review.strip():
         return 0
     fn = count_fn or _count_fn
     return int(fn(review))
-
 
 
 def recall(review: str, defects: list[dict], match_fn=None) -> float:
@@ -63,7 +61,7 @@ def deepseek_defect_match_judge(review: str, defect: dict) -> bool:
         "Does the review identify THIS defect (same underlying issue, location need not be exact)? "
         "Answer with exactly one word: YES or NO."
     )
-    # Mirror ood_metrics' DeepSeek convention: V4-Pro, thinking disabled (~3x faster).
+    # match ood_metrics' convention: V4-Pro with thinking disabled (~3x faster).
     resp = client.chat.completions.create(
         model=DEEPSEEK_V4_PRO,
         messages=[{"role": "user", "content": prompt}],
@@ -74,7 +72,7 @@ def deepseek_defect_match_judge(review: str, defect: dict) -> bool:
     return answer.startswith("Y")
 
 
-# Module-level binding so tests can patch _match_fn (mirrors corpo_reward._judge_fn).
+# module-level binding so tests can patch the matcher (mirrors corpo_reward._judge_fn)
 _match_fn = deepseek_defect_match_judge
 
 def deepseek_count_claims(review: str) -> int:
@@ -99,5 +97,5 @@ def deepseek_count_claims(review: str) -> int:
     return int(m.group()) if m else 0
 
 
-# Module-level binding so tests can patch the claim-counter (mirrors _match_fn).
+# module-level binding so tests can patch the claim-counter (mirrors _match_fn)
 _count_fn = deepseek_count_claims

@@ -1,8 +1,8 @@
 """Seeded train/eval split helper.
 
-Generic 80/20 (or other ratio) random splitter for any list-of-dicts dataset.
-NOTE: the CoRPO notebook trains on the SWE-CARE dev split and evals on test;
-this splitter is retained for future tasks that need to subdivide one corpus.
+Generic random splitter (default 80/20) for any list-of-dicts dataset. Not
+wired into the CoRPO training path, which already ships its own dev/test split
+this is here for tasks that need to carve up a single corpus.
 """
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ def split_train_eval(
     seed: int = 42,
     eval_fraction: float = 0.2,
 ) -> tuple[list[dict], list[dict]]:
-    """Deterministically partition rows into (train, eval) lists.
+    """Deterministically partition rows into (train, eval).
 
-    Shuffles by seeded RNG; eval takes the first eval_fraction of the shuffle.
+    Seeded shuffle, then eval takes the leading eval_fraction.
     """
     rng = random.Random(seed)
     shuffled = list(rows)
@@ -32,7 +32,7 @@ def load_split(
     seed: int = 42,
     eval_fraction: float = 0.2,
 ) -> tuple[list[dict], list[dict]]:
-    """Load JSONL and return seeded (train, eval) split."""
+    """Load a JSONL file and return the seeded (train, eval) split."""
     rows: list[dict] = []
     with Path(jsonl_path).open() as fh:
         for line in fh:

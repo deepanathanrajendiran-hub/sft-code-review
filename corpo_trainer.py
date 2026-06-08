@@ -1,42 +1,35 @@
-"""CoRPOTrainer: subclass of GRPOTrainer that clips the group baseline at
-R_min_correct, fixing GRPO's failure mode on ordinal rewards.
+"""GRPOTrainer subclass implementing CoRPO baseline-clipping.
 
-Paper: https://arxiv.org/abs/2511.04439 (Eq. 11)
+The fix: clamp the group baseline at r_min_correct so a group of all-bad
+rollouts can't manufacture positive advantage. From arXiv:2511.04439 Eq. 11:
+
     b_CoRPO   = max(R_min_correct, group_mean)
     A_CoRPO_i = R_i - b_CoRPO
 
-Implementation note: TRL's GRPOTrainer computes advantages inline inside the
-~200-line `_generate_and_score_completions` method (see TRL grpo_trainer.py
-around line 2165: `advantages = rewards - mean_grouped_rewards`). Rather than
-copy that whole method, we use a side-channel approach:
+TRL bakes the advantage computation deep inside the ~200-line
+`_generate_and_score_completions` (`advantages = rewards - mean_grouped_rewards`).
+Rather than fork that whole method we go through a side channel: capture the raw
+rewards in `_calculate_rewards`, let super() run, then recompute and overwrite
+`output["advantages"]`.
 
-  1. Override `_calculate_rewards` to capture the raw per-func rewards tensor.
-  2. Override `_generate_and_score_completions` to run super(), then recompute
-     the CoRPO-corrected advantages from the captured rewards and overwrite
-     `output["advantages"]`.
-
-Constraints:
-- Requires `scale_rewards="none"` in GRPOConfig — std-normalization would break
-  the CoRPO baseline math. The constructor asserts this.
-- Targets `multi_objective_aggregation="sum_then_normalize"` (TRL default).
-- Targets TRL 0.22.2 (the version pinned by the canonical Unsloth GRPO Colab
-  notebook). Method signatures verified against
-  https://raw.githubusercontent.com/huggingface/trl/v0.22.2/trl/trainer/grpo_trainer.py
-  If TRL changes the output dict's "advantages" key or the `_calculate_rewards`
-  signature, this subclass breaks loudly via the RuntimeError in
-  `_generate_and_score_completions`.
-- Multi-GPU: the post-process slicing assumes single-process; for multi-GPU,
-  the process_index slicing needs adjustment.
+Assumptions, all enforced or it breaks loudly:
+- scale_rewards="none" in GRPOConfig. std-normalization would wreck the baseline
+  math; the constructor asserts it.
+- multi_objective_aggregation="sum_then_normalize" (TRL default).
+- Pinned to TRL 0.22.2 (the version in the Unsloth GRPO Colab). If TRL moves the
+  "advantages" key or changes the _calculate_rewards signature, the RuntimeError
+  in _generate_and_score_completions fires.
+- The post-process slice assumes single process. Multi-GPU needs the
+  process_index slicing revisited.
 """
 from __future__ import annotations
 
 import torch
 
-# Unsloth's import side-effect patches `vllm.sampling_params` to provide a
-# `GuidedDecodingParams` shim. vLLM 0.12+ removed it; TRL 0.22.2 still imports
-# it at module-load. Without this `import unsloth` happening BEFORE `from trl`,
-# we get: ImportError: cannot import name 'GuidedDecodingParams' from 'vllm.sampling_params'
-# Wrapped in try/except so local test environments (no unsloth installed) still work.
+# importing unsloth patches vllm.sampling_params to re-add the GuidedDecodingParams
+# shim that vLLM 0.12+ dropped but TRL 0.22.2 still imports at module load. This
+# has to happen before `from trl`, or the trl import dies with ImportError. guarded
+# so local test envs without unsloth still import this module.
 try:
     import unsloth  # noqa: F401 — load for its import-time monkey-patches
 except ImportError:
@@ -46,18 +39,13 @@ from trl import GRPOTrainer
 
 
 class CoRPOTrainer(GRPOTrainer):
-    """GRPOTrainer with baseline-clipping (CoRPO) advantage computation."""
+    """GRPOTrainer with CoRPO (baseline-clipping) advantages."""
 
     def __init__(self, *args, r_min_correct: float = 0.0, **kwargs):
-        """Initialize CoRPOTrainer.
-
-        Args:
-            r_min_correct: Correctness threshold from CoRPO Eq. 11. Rollouts
-                with reward below this value cannot receive positive advantage,
-                even when the group mean is also below it. Typical range: 0.0
-                (binary rewards centered at 0) to 0.5 (composite rewards in
-                [0, 1] where 0.5 = "must beat the median of perfect-vs-junk").
-            All other args/kwargs are forwarded to GRPOTrainer.__init__.
+        """r_min_correct is the CoRPO correctness threshold (Eq. 11): rollouts
+        scoring below it can't get positive advantage even when the whole group
+        is below it. ~0.0 for binary rewards centered at 0, up to ~0.5 for
+        composite rewards in [0, 1]. Everything else forwards to GRPOTrainer.
         """
         super().__init__(*args, **kwargs)
         self.r_min_correct = r_min_correct
@@ -72,11 +60,9 @@ class CoRPOTrainer(GRPOTrainer):
             )
 
     def _calculate_rewards(self, inputs, prompts, completions, completion_ids_list):
-        """Capture raw rewards for the post-process step.
-
-        Note: TRL gathers across processes before returning, so the captured
-        tensor has shape (global_B * G, num_reward_funcs), not local. The
-        slicing in _generate_and_score_completions accounts for this.
+        """Stash the raw rewards for the post-process step. TRL gathers across
+        processes first, so the captured tensor is global (global_B * G, n_funcs),
+        not local — the slice in _generate_and_score_completions accounts for it.
         """
         rewards_per_func = super()._calculate_rewards(
             inputs, prompts, completions, completion_ids_list
@@ -85,7 +71,7 @@ class CoRPOTrainer(GRPOTrainer):
         return rewards_per_func
 
     def _generate_and_score_completions(self, inputs):
-        """Run super, then replace GRPO advantages with CoRPO advantages."""
+        """Run super, then swap GRPO advantages for CoRPO advantages."""
         try:
             output = super()._generate_and_score_completions(inputs)
             captured = self._last_raw_rewards
@@ -101,18 +87,15 @@ class CoRPOTrainer(GRPOTrainer):
                 "produce GRPO advantages — refusing to continue."
             )
 
-        # Aggregate per-func rewards with weights (mirrors TRL grpo_trainer.py
-        # weighted reward aggregation, ~line 1486 in TRL 0.12-0.19).
+        # weighted aggregation across reward funcs, matching TRL's own
         rewards_per_func = captured
         weights = self.reward_weights.to(self.accelerator.device)
         rewards = (rewards_per_func * weights.unsqueeze(0)).nansum(dim=1)
 
-        # Recompute CoRPO advantages on the full (pre-slice) batch
         new_advantages_full = self._compute_corpo_advantages(rewards)
 
-        # output["advantages"] is sliced for this process. For single-GPU
-        # (process_index=0) the slice is the whole tensor; for multi-GPU,
-        # TRL's process_slice logic uses contiguous shards.
+        # output["advantages"] is this process's slice. single-GPU gets the whole
+        # tensor; multi-GPU shards are contiguous, hence the process_index math.
         per_process_size = len(output["advantages"])
         process_index = getattr(self.accelerator, "process_index", 0)
         start = process_index * per_process_size
@@ -124,14 +107,9 @@ class CoRPOTrainer(GRPOTrainer):
         return output
 
     def _compute_corpo_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
-        """Compute CoRPO advantages from grouped per-rollout rewards.
-
-        rewards: tensor of shape (B * G,) — flat batch of per-rollout scalars.
-        Returns advantages of the same flat shape.
-
-        Test-friendly: this method has no dependence on the GRPOTrainer state
-        beyond `self.r_min_correct` and `self.num_generations`. Task 6's unit
-        tests target this method directly via `CoRPOTrainer.__new__`.
+        """Group-mean baseline clamped at r_min_correct, applied to flat (B*G,)
+        rewards. Kept free of trainer state beyond r_min_correct and
+        num_generations so the unit tests can hit it via __new__.
         """
         num_gens = self.num_generations
         rewards_flat = rewards.view(-1)

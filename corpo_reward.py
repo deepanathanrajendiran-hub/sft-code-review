@@ -1,19 +1,15 @@
-"""Composite reward function for CoRPO training.
+"""Reward functions for CoRPO training.
 
-Reward = 0.7 * pairwise_score + 0.2 * hallucination_score + 0.1 * length_sanity_score
-All components return values in [0.0, 1.0]. Composite is also [0.0, 1.0].
+Two reward paths live here:
 
-Scoring operates on the EXTRACTED REVIEW (post-_extract_review), not on the raw
-rollout. This matches what production deployment evaluates. An empty or
-placeholder extraction returns 0.0 immediately.
+  - composite_reward: the original pairwise-judge reward (0.7 pairwise + 0.2
+    hallucination + 0.1 length). Gameable, kept for reference.
+  - verifiable_reward: the v5 path actually used in training. No judge, no
+    opponent — quality comes from recall/precision against labeled defects
+    (or restraint on clean records), so Goodhart can't apply.
 
-Module structure:
-  - length_sanity_score : pure-Python band reward, anchored on v4 OOD distribution
-  - hallucination_score : wraps ood_metrics.hallucination_rate
-  - pairwise_score      : binary 0/0.5/1.0 reward via DeepSeek V4-Pro judge
-  - composite_reward    : weighted sum of the three (entry point for the trainer)
-  - BaseSampleCache     : in-memory lookup for cached base-model rollouts
-  - _build_base_cache_cli : CLI to pre-generate the base-sample cache
+Both score the EXTRACTED REVIEW (post-_extract_review), not the raw rollout —
+that's what production deploys. An empty or placeholder extraction scores 0.0.
 """
 from __future__ import annotations
 from ood_metrics import hallucination_rate as _ood_hallucination_rate
@@ -28,23 +24,11 @@ from defect_match import caught_count, count_claims
 
 
 def length_sanity_score(text: str) -> float:
-    """Reward outputs in the v4 OOD extracted-review distribution.
+    """Band reward for review length, anchored on the v4 OOD distribution.
 
-    Calibration:
-      - v4-deployed extracted-review median ~600 chars (per 2026-05-22 journal)
-      - Plateau [150, 1000] covers terse-to-thorough reviews
-      - Linear taper to 0 at 0 chars (collapse) and 2500 chars (explosion)
-
-    The band is anchored to the *extracted review* string (post-_extract_review),
-    NOT the raw rollout. This matches what composite_reward now scores and what
-    production deployment evaluates.
-
-    Shape:
-      - 0 chars     -> 0.0
-      - 75 chars    -> 0.50
-      - 150-1000    -> 1.0    (v4 OOD band)
-      - 1750 chars  -> 0.50
-      - 2500+ chars -> 0.0
+    Full credit in [150, 1000] chars (v4-deployed median ~600). Linear taper to
+    0 at 0 chars (collapse) and 2500 chars (explosion). Measured against the
+    extracted review, not the raw rollout.
     """
     n = len(text)
     if 150 <= n <= 1000:
@@ -54,24 +38,19 @@ def length_sanity_score(text: str) -> float:
     return max(0.0, 1.0 - (n - 1000) / 1500)
 
 def hallucination_score(diff: str, review_text: str) -> float:
-    """Score in [0, 1] = 1.0 - hallucination_rate.
+    """1.0 - hallucination_rate; higher means fewer ungrounded identifiers.
 
-    Wraps ood_metrics.hallucination_rate which counts backticked identifiers
-    in the review that don't appear in the diff (and aren't on the STOPWORDS
-    allow-list). Higher score = fewer hallucinations.
-
-    Returns 1.0 if no backticked identifiers to check (or all are grounded).
+    Counts backticked identifiers in the review that don't appear in the diff
+    and aren't on the STOPWORDS allow-list. Returns 1.0 when there's nothing to
+    flag.
     """
-    # ood_metrics.hallucination_rate takes a dict with 'diff' and 'v4_pred'
     pred = {"diff": diff, "v4_pred": review_text}
     rate = _ood_hallucination_rate(pred)
     return max(0.0, 1.0 - rate)
 
 
-# Module-level binding so tests can patch _judge_fn
-# (Production: V4-Pro binary judge — V4-Flash was too conservative, calling TIE on >95%
-# of v4-vs-base comparisons during the variance gate. V4-Pro discriminates better at
-# ~3× cost which is still negligible.)
+# module-level so tests can patch it. V4-Pro, not Flash: Flash called TIE on
+# >95% of v4-vs-base comparisons, which kills the variance gate.
 _judge_fn = deepseek_v4pro_pairwise_judge
 
 
@@ -81,35 +60,14 @@ def pairwise_score(
     base_sample: str,
     reference: str,
 ) -> float:
-    """Binary pairwise reward via DeepSeek V4-Pro judge.
-
-    Returns:
-        1.0 if rollout beats base_sample (judge says A)
-        0.0 if rollout loses (judge says B)
-        0.5 if TIE
-
-    Switched from V4-Flash on 2026-05-25 — variance gate showed V4-Flash
-    called TIE on >95% of v4-vs-base comparisons (std=0.054 vs threshold 0.10).
-    V4-Pro is more decisive at ~$12/epoch (was ~$3.60 for V4-Flash).
-    """
+    """Binary pairwise reward: 1.0 rollout wins, 0.0 loses, 0.5 tie."""
     verdict = _judge_fn(rollout, base_sample, diff, reference)
     if verdict == "A":
         return 1.0
     if verdict == "B":
         return 0.0
-    return 0.5  # TIE
+    return 0.5
 
-# Run #2 weight rebalance (2026-05-26 after run #1 -22% lift):
-#   - Bumped pairwise from 0.6 → 0.7. Pairwise vs v4 IS the production metric;
-#     the run #1 reward had pairwise contribute only 0.6 of total, so winning
-#     pairwise was worth ~0.6 reward while gaming length+halluc was ~0.4.
-#     Model rationally chose the easier path. Boosting pairwise weight makes
-#     it the dominant signal.
-#   - Reduced halluc from 0.3 → 0.2. Hallucination is a guardrail, not a
-#     primary objective. 0.3 weight gave it too much pull, and the cheapest
-#     way to keep halluc-score high is to be terse — contributing to length
-#     collapse.
-#   - Kept length at 0.1 (small disincentive against runaway/collapsed length).
 PAIRWISE_WEIGHT = 0.7
 HALLUC_WEIGHT = 0.2
 LENGTH_WEIGHT = 0.1
@@ -121,20 +79,13 @@ def composite_reward(
     base_sample: str,
     reference: str,
 ) -> float:
-    """Composite reward in [0, 1] for CoRPO training.
+    """Weighted pairwise + hallucination + length reward, in [0, 1].
 
-    Scoring is performed on the EXTRACTED REVIEW (post-_extract_review), not on
-    the raw rollout. This matches what production deployment evaluates and what
-    the v4 OOD length distribution was measured against. An empty/placeholder
-    extraction returns 0.0 — failure of the extractor IS failure at deployment.
-
-    R = PAIRWISE_WEIGHT * pairwise_score(review, base_sample, ...)
-      + HALLUC_WEIGHT   * hallucination_score(diff, review)
-      + LENGTH_WEIGHT   * length_sanity_score(review)
+    Scores the extracted review. An empty/placeholder extraction returns 0.0 —
+    a failed extractor is a failed deployment.
     """
-    # _extract_review always returns str (never None); strip handles whitespace-only.
     review = _extract_review(rollout)
-    # Placeholder ("..." only) is a deployment failure; treat as no review.
+    # a "..." placeholder is a deployment failure, treat it as no review
     if not review or review.strip() in ("", "..."):
         return 0.0
 
@@ -158,7 +109,7 @@ class BaseSampleCache:
         return self._data[instance_id]
 
 def load_base_sample_cache(path: Path | str) -> BaseSampleCache:
-    """Load base-sample cache from JSONL (one {instance_id, base_output} per line)."""
+    """Load the cache from JSONL (one {instance_id, base_output} per line)."""
     data: dict[str, str] = {}
     with Path(path).open() as fh:
         for line in fh:
@@ -170,16 +121,10 @@ def load_base_sample_cache(path: Path | str) -> BaseSampleCache:
     return BaseSampleCache(_data=data)
 
 def _build_base_cache_cli():
-    """CLI: generate one base-model rollout per training prompt, save to disk.
+    """CLI: generate one base-model rollout per training prompt and save it.
 
-    Called via:
-        python corpo_reward.py --build-base-cache \\
-            --input train_prompts.jsonl \\
-            --output cache/base_samples.jsonl \\
-            --base-model unsloth/Qwen2.5-Coder-7B-Instruct
-
-    Uses the same generation params as run_ood_eval.py (temp=0, max_tokens=4096,
-    rep_pen=1.1) for protocol parity with the production v4 inference.
+    Uses run_ood_eval's generation params (temp=0, max_tokens=4096, rep_pen=1.1)
+    so the cached base samples match production v4 inference exactly.
     """
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-base-cache", action="store_true", required=True)
@@ -188,7 +133,7 @@ def _build_base_cache_cli():
     ap.add_argument("--base-model", default="unsloth/Qwen2.5-Coder-7B-Instruct")
     args = ap.parse_args()
 
-    # Reuse run_ood_eval._generate exactly — same chat template, same sampling.
+    # reuse run_ood_eval._generate so the chat template and sampling stay in sync
     from run_ood_eval import _generate
     from transformers import AutoTokenizer
 
@@ -214,30 +159,24 @@ def _build_base_cache_cli():
 if __name__ == "__main__":
     _build_base_cache_cli()
 
-# === v5 PRECISION-AWARE verifiable reward (replaces the gameable pairwise-judge composite) ===
-# R = 0.6*quality + 0.3*grounding(1-halluc) + 0.1*length_sanity   (see verifiable_components)
-# - quality on a LABELED record = F1(recall, precision): recall = caught/known defects,
-#   precision = caught/claims -> over-claiming (shotgun) LOWERS the score.
-# - quality on a CLEAN record  = 1/(1+claims): any invented defect LOWERS the score.
-# - grounding: 1 - hallucination_rate vs the diff (the goal's "less hallucination" half).
-# - length: mild anti-collapse / anti-verbosity band.
-# No opponent, no quality judge -> Goodhart can't apply; verbosity/over-claiming is
-# penalized by the precision term, so the reward pushes recall UP and hallucination DOWN.
-RECALL_WEIGHT = 0.6   # weight on `quality` (F-beta on labeled, restraint on clean)
+# v5 verifiable reward: 0.6*quality + 0.3*grounding + 0.1*length.
+# quality is F-beta(recall, precision) on labeled records (over-claiming lowers
+# precision -> lowers score) and a restraint term on clean records (any invented
+# defect lowers it). No judge/opponent means there's nothing to game; the
+# precision term is what pushes recall up and hallucination down.
+RECALL_WEIGHT = 0.6
 GROUND_WEIGHT = 0.3
 LEN_WEIGHT = 0.1
 
-# v5.1 rebalance (after checkpoint-75 cut fp_rate 0.775->0.730 BUT also recall 0.094->0.070 —
-# the model got globally quieter). Favor recall so catching real defects outweighs the
-# clean-diff "be silent" pull, and soften the clean penalty so 1-2 minor notes aren't crushed.
-RECALL_BETA = 2.0          # F-beta: recall weighted beta^2=4x precision on labeled records
-CLEAN_CLAIM_PENALTY = 0.25  # clean-record quality = max(0, 1 - 0.25*claims) (was 1/(1+claims), too steep)
-
-
+# beta>1 favors recall; 1.5 weights recall ~2.25x precision. beta=2 over-flagged
+# (fabricated bugs were reward-positive), so it's dialed back. The clean penalty
+# is the cost of asserting an unsupported defect on a clean record.
+RECALL_BETA = 1.5
+CLEAN_CLAIM_PENALTY = 0.35  # clean-record quality = max(0, 1 - 0.35*claims)
 
 
 def _fbeta(recall: float, precision: float, beta: float = 1.0) -> float:
-    """F-beta of recall & precision. beta>1 favors recall (beta^2 x weight)."""
+    """F-beta of recall & precision; beta>1 favors recall (beta^2 weight)."""
     b2 = beta * beta
     denom = b2 * precision + recall
     if denom <= 0:
@@ -255,13 +194,13 @@ def verifiable_components(
         caught = caught_count(review, defects, match_fn=match_fn)
         recall = caught / len(defects)
         precision = min(1.0, caught / n_claims) if n_claims > 0 else 0.0
-        quality = _fbeta(recall, precision, RECALL_BETA)   # recall-favoring (v5.1)
+        quality = _fbeta(recall, precision, RECALL_BETA)
         fp_rate = None
     else:
         caught = None
         recall = None
         precision = None
-        quality = max(0.0, 1.0 - CLEAN_CLAIM_PENALTY * n_claims)  # gentler than 1/(1+claims)
+        quality = max(0.0, 1.0 - CLEAN_CLAIM_PENALTY * n_claims)
         fp_rate = 1.0 if n_claims > 0 else 0.0
     reward = RECALL_WEIGHT * quality + GROUND_WEIGHT * grounding + LEN_WEIGHT * length
     return {
@@ -271,11 +210,10 @@ def verifiable_components(
     }
 
 
-
 def verifiable_reward(diff: str, rollout: str, defects: list[dict], match_fn=None, count_fn=None) -> float:
     review = _extract_review(rollout)
-    # Normalize stray <review> tags: _extract_review's fallback returns the literal
-    # "<review></review>" for an empty block — that is a deployment failure, score 0.
+    # _extract_review's fallback yields the literal "<review></review>" for an
+    # empty block — strip the tags so that lands as no review (score 0)
     review = review.replace("<review>", "").replace("</review>", "").strip()
     if not review or review == "...":
         return 0.0

@@ -1,21 +1,18 @@
-"""Extract clean, grounded defect tuples from raw PR review threads (v5 Stage 1).
+"""Extract clean, grounded defect tuples from raw PR review threads.
 
 SWE-CARE `reference_comments` are raw PR discussion threads — `@user:` questions,
-`@author:` replies, ```suggestion``` blocks, "good point / done" — NOT clean defect
-labels. This module classifies each thread comment as a real defect vs. a
-question/style/reply, and emits a clean tuple {path, line, issue_type, canonical_desc}
-for the real ones. The result is the judge-independent label set the v5 verifiable
-reward (corpo_reward.verifiable_reward) and the eval asset both consume.
+`@author:` replies, ```suggestion``` blocks, "good point / done" — not clean defect
+labels. This classifies each thread comment as a real defect vs. a question/style/reply
+and emits a clean tuple {path, line, issue_type, canonical_desc} for the real ones. The
+result is the judge-independent label set consumed by the verifiable reward
+(corpo_reward.verifiable_reward) and the eval.
 
-Grounding rules (so the reward only credits defects the model can actually see):
-  - drop comments whose `path` is absent from the diff (uncatchable from the diff alone)
-  - drop comments with no `path`
+Grounding: we drop comments whose `path` is missing or absent from the diff, since the
+model can't catch a defect it can't see.
 
-The classifier (`extract_fn`) is injectable so all assembly/grounding logic is unit
-tested with no API. The default `_extract_fn` is the DeepSeek V4-Pro classifier; the
-extraction is GROUNDED in the existing human comment text (it classifies/condenses an
-existing comment — it does NOT free-generate new issues, which would rebuild a gameable
-judge with extra steps).
+The classifier (`extract_fn`) is injectable so assembly/grounding logic stays unit
+testable with no API. The default classifies/condenses existing comment text — it does
+not free-generate new issues (that would just rebuild a gameable judge).
 """
 from __future__ import annotations
 
@@ -40,15 +37,14 @@ def diff_paths(diff: str) -> set[str]:
 
 
 def parse_extraction(raw: str) -> dict | None:
-    """Parse a classifier response into {issue_type, canonical_desc} or None.
+    """Parse a classifier response into {issue_type, canonical_desc}, or None.
 
-    None means 'not a real defect' (question/style/reply) or unparseable. A defect
-    must have is_defect truthy AND both issue_type and canonical_desc present.
+    None means not a real defect (question/style/reply) or unparseable. A defect needs
+    is_defect truthy plus both issue_type and canonical_desc present.
     """
     if not raw:
         return None
     text = raw.strip()
-    # strip ```json ... ``` fences if present
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
     if m:
         text = m.group(1).strip()
@@ -68,8 +64,8 @@ def parse_extraction(raw: str) -> dict | None:
 def extract_defects_for_record(record: dict, extract_fn=None) -> dict:
     """Return {instance_id, defects:[{path,line,issue_type,canonical_desc}, ...]} for one record.
 
-    Grounding (path-in-diff) is checked BEFORE the classifier so ungrounded comments
-    cost no API call. An empty defects list is a clean diff (the model should find nothing).
+    Grounding is checked before the classifier so ungrounded comments cost no API call.
+    An empty defects list means a clean diff (the model should find nothing).
     """
     fn = extract_fn or _extract_fn
     paths = diff_paths(record.get("diff", ""))
@@ -77,7 +73,7 @@ def extract_defects_for_record(record: dict, extract_fn=None) -> dict:
     for c in record.get("reference_comments", []):
         path = c.get("path")
         if not path or path not in paths:
-            continue  # ungrounded — uncatchable from the diff
+            continue  # uncatchable from the diff alone
         res = fn(record["diff"], c)
         if not res:
             continue  # classified non-defect
@@ -120,7 +116,7 @@ def _deepseek_extract(diff: str, comment: dict) -> dict | None:
     return parse_extraction(resp.choices[0].message.content)
 
 
-# Module-level binding so tests can patch the classifier (mirrors corpo_reward._judge_fn).
+# module-level binding so tests can patch the classifier
 _extract_fn = _deepseek_extract
 
 
