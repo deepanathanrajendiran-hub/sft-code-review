@@ -1,6 +1,7 @@
-"""Six metrics for OOD code-review evaluation against SWE-CARE labels.
+"""OOD code-review eval metrics against SWE-CARE labels.
 
-Pure-Python; no GPU required. Importable from notebooks or callable as CLI.
+IoU, hit-rate, hallucination-rate, and pairwise win-rate. Pure Python, no GPU.
+Import the functions from a notebook, or run as a CLI.
 """
 from __future__ import annotations
 
@@ -16,21 +17,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import threading
 
-# ---- location extraction ----
-
-# Matches `path/to/file.py:42`  or `path/to/file.py`
+# `path/to/file.py:42` or `path/to/file.py`
 _FILE_LINE_RE = re.compile(
     r"`([A-Za-z0-9_./\-]+\.(?:py|js|jsx|ts|tsx|java|go|rb|c|cpp|h|hpp|rs))(?::(\d+))?`"
 )
-# Matches `identifier_or_method` — bare backticked code references
+# bare backticked code references like `some_method`
 _IDENT_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]{1,40})`")
 
 
 def extract_locations(review: str) -> list[dict[str, Any]]:
-    """Parse a free-form review into a list of {file?, line?, identifier?} dicts.
+    """Parse a free-form review into {file?, line?, identifier?} dicts.
 
-    A review may yield multiple entries. file/line pairs are extracted from
-    backticked paths; bare identifiers are emitted as identifier-only entries.
+    One review can yield several entries: file/line pairs from backticked paths,
+    plus identifier-only entries for bare backticked symbols.
     """
     if not review:
         return []
@@ -47,13 +46,13 @@ def extract_locations(review: str) -> list[dict[str, Any]]:
         seen_pairs.add(key)
         out.append({"file": file, "line": line})
 
-    # bare identifiers — only those NOT already captured as a file
+    # don't double-count an identifier we already pulled out as a file
     captured_files = {entry["file"] for entry in out}
     for m in _IDENT_RE.finditer(review):
         ident = m.group(1)
         if ident in captured_files:
             continue
-        # heuristic: skip pure-numeric and very short tokens
+        # drop pure-numeric and very short tokens
         if ident.isdigit() or len(ident) < 3:
             continue
         if ident in seen_idents:
@@ -62,9 +61,6 @@ def extract_locations(review: str) -> list[dict[str, Any]]:
         out.append({"identifier": ident})
 
     return out
-
-
-# ---- IoU metrics ----
 
 
 def _file_line_pairs(locs: list[dict[str, Any]]) -> set[tuple[str, int]]:
@@ -81,20 +77,18 @@ def iou_strict(pred: dict, labels: list[dict]) -> float:
     pred_pairs = _file_line_pairs(pred_locs)
     label_pairs = _label_pairs(labels)
     if not pred_pairs and not label_pairs:
-        return 1.0  # vacuous agreement — model correctly said nothing on a clean diff
+        return 1.0  # model correctly said nothing on a clean diff
     inter = len(pred_pairs & label_pairs)
     union = len(pred_pairs | label_pairs)
     return inter / union if union else 0.0
 
 
 def iou_lenient(pred: dict, labels: list[dict], line_tol: int = 5) -> float:
-    """IoU with relaxed matching:
-       - Same file, line within ±line_tol → match
-       - Same identifier appears anywhere in label text → match
-    """
+    """IoU with relaxed matching: same file within ±line_tol, or identifier
+    appearing anywhere in the label text."""
     pred_locs = extract_locations(pred.get("v4_pred", ""))
     if not pred_locs and not labels:
-        return 1.0  # vacuous agreement — model correctly said nothing on a clean diff
+        return 1.0  # model correctly said nothing on a clean diff
 
     matched_pred: set[int] = set()
     matched_label: set[int] = set()
@@ -114,24 +108,21 @@ def iou_lenient(pred: dict, labels: list[dict], line_tol: int = 5) -> float:
 
 
 def _lenient_match(loc: dict, lbl: dict, line_tol: int) -> bool:
-    # file + nearby line
     if loc.get("file") and loc.get("line") and lbl.get("path") and lbl.get("line"):
         if loc["file"] == lbl["path"] and abs(loc["line"] - lbl["line"]) <= line_tol:
             return True
-    # identifier appearance in label text — word-boundary match to avoid substring false-positives
+    # word-boundary match so we don't fire on substrings
     if loc.get("identifier") and lbl.get("text"):
         pattern = r"\b" + re.escape(loc["identifier"]) + r"\b"
         if re.search(pattern, lbl["text"]):
             return True
     return False
 
-# ---- hit-rate ----
-
 
 def hit_rate(pred: dict, labels: list[dict], line_tol: int = 5) -> float:
     """Fraction of reference labels caught by v4_pred (lenient line match)."""
     if not labels:
-        return 1.0  # vacuous — model correctly didn't flag a clean diff
+        return 1.0  # clean diff, correctly not flagged
     pred_locs = extract_locations(pred.get("v4_pred", ""))
     caught = 0
     for lbl in labels:
@@ -142,9 +133,9 @@ def hit_rate(pred: dict, labels: list[dict], line_tol: int = 5) -> float:
     return caught / len(labels)
 
 def hit_rate_strict(pred: dict, labels: list[dict]) -> float:
-    """Fraction of reference labels caught by v4_pred (strict exact file+line match)."""
+    """Fraction of reference labels caught by v4_pred (exact file+line match)."""
     if not labels:
-        return 1.0  # vacuous — model correctly didn't flag a clean diff
+        return 1.0  # clean diff, correctly not flagged
     pred_locs = extract_locations(pred.get("v4_pred", ""))
     pred_pairs = _file_line_pairs(pred_locs)
     caught = sum(
@@ -153,10 +144,8 @@ def hit_rate_strict(pred: dict, labels: list[dict]) -> float:
     )
     return caught / len(labels)
 
-# ---- hallucination rate ----
 
-# Mirror of the stopword list in eval.ipynb Cell 5 (_STOP).
-# Keep these in sync when adding new stopwords.
+# Mirror of the stopword list in eval.ipynb Cell 5 — keep the two in sync.
 STOPWORDS = frozenset({
     # Python keywords (≥3 chars; shorter ones already filtered by _IDENT_RE min length)
     'self', 'return', 'import', 'class', 'with', 'from', 'def',
@@ -206,7 +195,7 @@ STOPWORDS = frozenset({
     'return_tensors', 'input_ids', 'hidden_states', 'logits', 'embeddings',
     # Common framework method/attribute names
     'outputs', 'headers', 'forward', 'generate', 'encode', 'decode',
-    # Dunders (comprehensive — these are Python protocol methods, never hallucinations)
+    # Dunders — Python protocol methods, never hallucinations
     '__call__', '__init__', '__new__', '__del__', '__post_init__',
     '__repr__', '__str__', '__bytes__', '__format__', '__hash__', '__bool__',
     '__len__', '__length_hint__', '__sizeof__',
@@ -302,32 +291,30 @@ STOPWORDS = frozenset({
 
 
 def _diff_identifiers(diff: str) -> set[str]:
-    """Extract identifiers from a diff hunk — INCLUDING context lines and @@ headers.
+    """Identifiers visible anywhere in a diff hunk — added, removed, and context.
 
-    A reviewer can validly reference any symbol visible in the diff context
-    (surrounding function names, imports, unchanged code referenced in the change).
-    Restricting to +/- lines only under-counts the legitimate symbol pool and
-    inflates the hallucination rate on PRs where v4 references context symbols.
+    A reviewer can legitimately reference any symbol in the surrounding context
+    (enclosing function names, imports, unchanged code touched by the change).
+    Restricting to +/- lines under-counts the legit symbol pool and inflates the
+    hallucination rate when v4 names a context symbol.
     """
     idents: set[str] = set()
     in_hunk = False
     for line in diff.splitlines():
         if not line:
             continue
-        # @@ headers often include the enclosing function name (e.g. "@@ ... def foo(...)").
-        # Capture identifiers from them too.
+        # @@ headers usually carry the enclosing function name too
         if line.startswith("@@"):
             in_hunk = True
             for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,40}", line):
                 idents.add(tok)
             continue
-        # Skip file-level diff metadata lines (paths, hashes, mode bits, etc.).
+        # file-level metadata (paths, hashes, mode bits) holds no real symbols
         if line.startswith(("+++", "---", "diff ", "index ", "new file", "deleted file",
                             "similarity index", "rename ", "Binary files", "GIT binary")):
             continue
         if in_hunk:
-            # Include +, -, and " " (space-prefixed context) lines. Skip the rare "\" lines
-            # (no-newline-at-end-of-file markers) which carry no useful identifiers.
+            # +, -, and context (space-prefixed) lines. The "\" no-newline marker carries nothing.
             if line[0] in "+- ":
                 for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,40}", line):
                     idents.add(tok)
@@ -335,11 +322,8 @@ def _diff_identifiers(diff: str) -> set[str]:
 
 
 def hallucination_rate(pred: dict) -> float:
-    """Fraction of backticked identifiers in v4_pred that don't appear in the diff
-    (and aren't in STOPWORDS).
-
-    Returns the per-instance rate: hallucinated / candidates (non-stopword backticks).
-    """
+    """Per-instance rate of backticked identifiers in v4_pred that are neither
+    in the diff nor in STOPWORDS: hallucinated / non-stopword candidates."""
     review = pred.get("v4_pred", "")
     diff = pred.get("diff", "")
     if not review:
@@ -357,15 +341,13 @@ def hallucination_rate(pred: dict) -> float:
     hallucinated = {c for c in candidates if c not in diff_idents}
     return len(hallucinated) / len(candidates)
 
-# ---- breakdowns ----
-
 
 def breakdown_by_difficulty(
     preds: list[dict],
     labels_by_instance: list[list[dict]],
     metric_fn,
 ) -> dict[str, float]:
-    """Run metric_fn per-instance and average per difficulty bucket."""
+    """Per-instance metric averaged within each difficulty bucket."""
     return _groupby_avg(preds, labels_by_instance, metric_fn, key_field="difficulty")
 
 
@@ -374,7 +356,7 @@ def breakdown_by_problem_domain(
     labels_by_instance: list[list[dict]],
     metric_fn,
 ) -> dict[str, float]:
-    """Run metric_fn per-instance and average per problem_domain bucket."""
+    """Per-instance metric averaged within each problem_domain bucket."""
     return _groupby_avg(preds, labels_by_instance, metric_fn, key_field="problem_domain")
 
 
@@ -386,13 +368,10 @@ def _groupby_avg(preds, labels_by_instance, metric_fn, key_field) -> dict[str, f
     return {k: sum(v) / len(v) for k, v in groups.items()}
 
 
-# ---- pairwise helpers (shared across judge models) ----
-
-
 def _build_pairwise_prompt(diff: str, reference: str, ra: str, rb: str) -> str:
-    """The exact prompt text used by every pairwise judge in this module.
+    """The exact prompt every pairwise judge in this module uses.
 
-    Truncations: diff[:2000], reference[:500], ra[:500], rb[:500].
+    Inputs are truncated: diff[:2000], reference/ra/rb[:500].
     """
     return (
         "Compare two code reviews for the same diff. Which is better?\n\n"
@@ -406,10 +385,10 @@ def _build_pairwise_prompt(diff: str, reference: str, ra: str, rb: str) -> str:
 
 
 def _parse_pairwise_result(raw: str, swap: bool) -> str:
-    """Parse judge model output to 'A'/'B'/'TIE', undoing the A/B swap.
+    """Normalize judge output to 'A'/'B'/'TIE', undoing the A/B swap.
 
-    swap=True means the call was made with sides swapped, so an "A" output
-    actually refers to what the caller passed as B.
+    When swap is True the sides were passed reversed, so the judge's "A" really
+    means the caller's B.
     """
     result = raw.strip().upper()
     if "TIE" in result:
@@ -428,8 +407,6 @@ def _parse_pairwise_result(raw: str, swap: bool) -> str:
     return result
 
 
-# ---- pairwise (Haiku 3-vote majority — production judge, matches eval.ipynb Cell 6) ----
-
 HAIKU_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 _judge_client = None
@@ -440,7 +417,7 @@ def _get_judge_client():
     global _judge_client
     if _judge_client is None:
         with _judge_client_lock:
-            # Double-checked locking — recheck inside the lock
+            # double-checked locking: recheck inside the lock
             if _judge_client is None:
                 import anthropic
                 _judge_client = anthropic.AnthropicBedrock(aws_region="us-west-2")
@@ -448,7 +425,7 @@ def _get_judge_client():
 
 
 def haiku_pairwise_judge(review_a: str, review_b: str, diff: str, reference: str) -> str:
-    """One call. Randomized A/B order. Returns 'A', 'B', or 'TIE'."""
+    """One call, randomized A/B order. Returns 'A', 'B', or 'TIE'."""
     swap = random.random() > 0.5
     ra, rb = (review_b, review_a) if swap else (review_a, review_b)
 
@@ -468,8 +445,6 @@ def haiku_pairwise_judge_3vote(review_a: str, review_b: str, diff: str, referenc
     return top_label if top_count >= 2 else "TIE"
 
 
-# ---- pairwise (DeepSeek V4-Flash + V4-Pro) ----
-
 DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
 DEEPSEEK_V4_PRO = "deepseek-v4-pro"
 
@@ -478,7 +453,7 @@ _deepseek_client_lock = threading.Lock()
 
 
 def _get_deepseek_client():
-    """Return cached OpenAI-compatible client pointed at DeepSeek API."""
+    """Cached OpenAI-compatible client pointed at the DeepSeek API."""
     global _deepseek_client
     if _deepseek_client is None:
         with _deepseek_client_lock:
@@ -499,11 +474,11 @@ def _get_deepseek_client():
 def _deepseek_pairwise_judge(
     model: str, review_a: str, review_b: str, diff: str, reference: str
 ) -> str:
-    """Shared implementation: one-call binary judge against a DeepSeek model.
+    """One-call binary judge against a DeepSeek model.
 
-    Thinking mode disabled — for binary verdicts we don't need the reasoning
-    overhead. Drops per-call latency ~3× vs default. See:
-    https://api-docs.deepseek.com/guides/thinking_mode
+    Thinking mode is off: a binary verdict doesn't need the reasoning overhead,
+    and disabling it cuts per-call latency ~3x.
+    See https://api-docs.deepseek.com/guides/thinking_mode
     """
     swap = random.random() > 0.5
     ra, rb = (review_b, review_a) if swap else (review_a, review_b)
@@ -520,10 +495,9 @@ def _deepseek_pairwise_judge(
 def deepseek_v4flash_pairwise_judge(
     review_a: str, review_b: str, diff: str, reference: str
 ) -> str:
-    """One call. Randomized A/B order. Returns 'A', 'B', or 'TIE'.
+    """Cheap single-call judge for CoRPO training rollouts (not eval).
 
-    Cheap judge for CoRPO training rollouts (not eval). Mirrors haiku_pairwise_judge
-    prompt + truncations for protocol parity.
+    Same prompt + truncations as the Haiku judge. Returns 'A', 'B', or 'TIE'.
     """
     return _deepseek_pairwise_judge(DEEPSEEK_V4_FLASH, review_a, review_b, diff, reference)
 
@@ -531,10 +505,7 @@ def deepseek_v4flash_pairwise_judge(
 def deepseek_v4pro_pairwise_judge(
     review_a: str, review_b: str, diff: str, reference: str
 ) -> str:
-    """One call against V4-Pro (higher quality, slower). Returns 'A', 'B', or 'TIE'.
-
-    Used by eval (not training); training uses the cheaper V4-Flash judge.
-    """
+    """Higher-quality (slower) judge used by eval. Returns 'A', 'B', or 'TIE'."""
     return _deepseek_pairwise_judge(DEEPSEEK_V4_PRO, review_a, review_b, diff, reference)
 
 
@@ -572,7 +543,7 @@ _JUDGES = {
 }
 
 def _resolve_judge_fn(name: str):
-    """Map a --judge flag value to the corresponding judge function."""
+    """Map a --judge flag value to its judge function."""
     try:
         return _JUDGES[name]
     except KeyError:
@@ -584,23 +555,19 @@ def _resolve_judge_fn(name: str):
 def pairwise_win(
     preds: list[dict],
     api_key: str = "",  # ignored; AnthropicBedrock uses AWS credentials
-    n_votes: int = 3,  # ignored; vote count is baked into judge_fn (V4-Flash: 1, V4-Pro/Haiku: 3)
+    n_votes: int = 3,  # ignored; vote count is baked into judge_fn
     max_workers: int = 16,
     judge_fn=None,
     pred_a_field: str = "v4_pred",
     pred_b_field: str = "base_pred",
 ) -> dict:
-    """3-vote majority pairwise: side-A (default v4_pred) vs side-B (default base_pred)
-    with order swap and reference review. Returns aggregate dict including bootstrap
-    95% CI.
+    """Pairwise win-rate of side A vs side B, with order swap and reference, plus
+    a bootstrap 95% CI.
 
-    judge_fn defaults to haiku_pairwise_judge_3vote for backward compat with
-    library callers; CLI callers select a judge via the --judge flag (defaults
-    to v4pro3vote there).
-
-    pred_a_field / pred_b_field let callers compare arbitrary JSONL columns
-    (e.g. v4corpo_pred vs v4_pred for CoRPO eval); defaults preserve the
-    historical v4_pred vs base_pred behaviour.
+    judge_fn defaults to the 3-vote Haiku judge for library callers; the CLI
+    selects one via --judge (default v4pro3vote). pred_a_field / pred_b_field
+    pick which JSONL columns to compare (e.g. v4corpo_pred vs v4_pred), defaulting
+    to v4_pred vs base_pred.
     """
     if judge_fn is None:
         judge_fn = haiku_pairwise_judge_3vote
@@ -636,8 +603,6 @@ def pairwise_win(
     }
 
 
-# ---- CLI ----
-
 def _load_jsonl(path: Path | str) -> list[dict]:
     rows: list[dict] = []
     with Path(path).open() as fh:
@@ -649,7 +614,7 @@ def _load_jsonl(path: Path | str) -> list[dict]:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser. Extracted from main() for testability."""
+    """Build the CLI parser. Split out from main() so tests can exercise it."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--preds", required=True, help="ood_preds.jsonl")
     ap.add_argument("--labels", required=True, help="ood_input.jsonl")
@@ -684,7 +649,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return ap
 
 
-
 def main():
     args = _build_arg_parser().parse_args()
 
@@ -692,15 +656,14 @@ def main():
     inputs = _load_jsonl(args.labels)
     if not preds:
         raise SystemExit(f"No predictions found in {args.preds}")
-    # Align by instance_id
     by_id = {row["instance_id"]: row for row in inputs}
     labels_by_instance = [by_id[p["instance_id"]]["reference_comments"] for p in preds]
 
     def _score(rows, pred_field):
-        """Score all per-row metrics treating `pred_field` as the subject of evaluation.
+        """Run every per-row metric treating pred_field as the subject.
 
-        Inline-swaps the pred_field into "v4_pred" so the existing metric functions
-        (which read pred["v4_pred"]) work uniformly for v4 or base.
+        The metric functions all read pred["v4_pred"], so we copy pred_field into
+        that key to reuse them for either v4 or base.
         """
         subbed = [{**r, "v4_pred": r.get(pred_field, "")} for r in rows]
         n = len(subbed)
@@ -722,8 +685,8 @@ def main():
     }
 
     if not args.skip_base_calibration:
-        # Dual-score base on the same OOD distribution — needed by the decision gate to
-        # distinguish "v4 looks weak" from "the metric undersells everyone equally".
+        # Score base on the same OOD set so the decision gate can tell "v4 is weak"
+        # from "the metric undersells everyone equally".
         results["base"] = _score(preds, "base_pred")
 
     if not args.skip_pairwise:

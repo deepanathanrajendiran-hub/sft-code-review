@@ -23,7 +23,7 @@ All numbers are from the evaluation pipelines in this repo. Two distinct eval re
 
 **Reading it:** v4 reverses every v3 regression. v3 had pushed hallucination *up* to 34.5% and absolute quality *down* to 4.25; v4 brings hallucination to 7.0% and quality to 5.86 while winning 86% of head-to-head comparisons. The few-shot CoT prompt-engineering baseline — the obvious "do you even need fine-tuning?" challenger — wins only 13.5% against v4.
 
-> The `eval_results.json` checked into the repo is the **v3-era** dump (its `SFT` block shows the 34.5% hallucination; its `GRPO` block is a broken empty-extraction run). The v4 numbers above come from the patched 3-vote pipeline in `untitled folder/eval.ipynb`.
+> The `eval/eval_results.json` checked into the repo is the **v3-era** dump (its `SFT` block shows the 34.5% hallucination; its `GRPO` block is a broken empty-extraction run). The v4 numbers above come from the patched 3-vote pipeline in `eval/eval.ipynb`.
 
 ### Training curves (v4)
 

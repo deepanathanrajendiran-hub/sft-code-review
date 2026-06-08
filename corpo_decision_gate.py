@@ -1,9 +1,9 @@
 """CoRPO post-training decision gate.
 
-Implements the 8-step ordered checklist from the spec. Run after both eval
-JSONs are produced (v4 re-baseline + v4-corpo) and the Haiku cross-check.
+Turns the eval JSONs into a single ship/no-ship verdict. Run after both eval
+JSONs exist (v4 re-baseline + v4-corpo) and the Haiku cross-check.
 
-Verdicts (in priority order):
+The checks run in priority order, first match wins:
   1. ABORTED       — variance gate failed; training never started
   2. FAILED        — training diverged
   3. DO_NOT_SHIP   — Haiku cross-check shows no lift (V4-family judge bias)
@@ -11,7 +11,7 @@ Verdicts (in priority order):
   5. SUSPICIOUS    — per-domain spread > 10 pt (overfit risk)
   6. SHIP          — lift >= 1pt AND ci_lo > 50%
   7. INCONCLUSIVE  — lift >= 1pt but ci_lo <= 50% (need more samples)
-  8. FAILED        — did not clear 1pt bar
+  8. FAILED        — did not clear the 1pt bar
 """
 from __future__ import annotations
 
@@ -32,18 +32,7 @@ def decide(
     haiku_cross_check_lift: float,
     per_domain_spread: float,
 ) -> str:
-    """Returns one of: SHIP, FAILED, DO_NOT_SHIP, INCONCLUSIVE, SUSPICIOUS, ABORTED.
-
-    Evaluated in spec order (first match wins):
-      1. variance gate failed → ABORTED
-      2. training diverged → FAILED
-      3. Haiku cross-check negative → DO_NOT_SHIP (judge bias)
-      4. halluc regression > 1pt → FAILED
-      5. per-domain spread > 10pt → SUSPICIOUS
-      6. lift >= 1pt AND ci_lo > 50 → SHIP
-      7. lift >= 1pt AND ci_lo <= 50 → INCONCLUSIVE
-      8. else → FAILED
-    """
+    """Return the verdict string. See module docstring for the ordered checklist."""
     if not variance_gate_passed:
         return "ABORTED"
     if training_diverged:
@@ -80,17 +69,16 @@ def main():
     baseline = json.loads(Path(args.v4_baseline_json).read_text())
     haiku = json.loads(Path(args.haiku_cross_check_json).read_text())
 
-    # Pairwise (all in [0, 1] from ood_metrics; convert to percent)
+    # ood_metrics emits everything in [0, 1]; we work in percent throughout.
     pw = corpo.get("pairwise", {})
     winrate_pct = pw.get("win_rate", 0.0) * 100.0
     ci_lo = pw.get("win_rate_ci_lo", 0.0) * 100.0
     ci_hi = pw.get("win_rate_ci_hi", 0.0) * 100.0
 
-    # Hallucination (in [0, 1] from ood_metrics; convert to percent)
     halluc_v4 = baseline.get("hallucination_rate_mean", 0.0) * 100.0
     halluc_v4corpo = corpo.get("hallucination_rate_mean", 0.0) * 100.0
 
-    # Per-domain spread = max - min IoU across problem_domain buckets (in percent points)
+    # spread = max - min lenient IoU across problem_domain buckets, in pts
     per_domain = corpo.get("iou_lenient_by_problem_domain", {}) or {}
     if per_domain:
         values_pct = [v * 100.0 for v in per_domain.values() if isinstance(v, (int, float))]
@@ -98,7 +86,7 @@ def main():
     else:
         per_domain_spread = 0.0
 
-    # Haiku cross-check lift (point estimate; no CI needed at N=100)
+    # point estimate only — N=100 is too small for a meaningful CI here
     haiku_winrate_pct = haiku.get("pairwise", {}).get("win_rate", 0.0) * 100.0
     haiku_cross_check_lift = haiku_winrate_pct - 50.0
 

@@ -1,23 +1,17 @@
-"""Paired bootstrap significance for v5-vs-v4 recall / fp / hallucination.
+"""Paired bootstrap test for v5-vs-v4 on recall / fp / hallucination.
 
-WHY THIS EXISTS
----------------
-score_v5.py reports the MEAN recall of each model independently. The goal then
-asks "is v5 recall > v4 recall?" — but comparing two independent noisy means has
-no error bar. Per-record recall is ~{0, 0.5, 1.0} (std ~0.4); with ~150 labeled
-records the standard error on the mean is ~0.033, so a 0.093 -> 0.070 swing can be
-pure per-record noise. The v5.0 "recall regressed" verdict (and any similarly-sized
-v5.1 "win") is not trustworthy from two means alone.
+score_v5.py reports each model's mean recall independently, but comparing two
+noisy means has no error bar. Per-record recall is roughly {0, 0.5, 1.0}
+(std ~0.4), so at ~150 labeled records the SE on the mean is ~0.033 — a swing
+that size can be pure noise. The fix is to pair: score the SAME records with
+BOTH models, take the per-record delta (b - a), and bootstrap its mean. Pairing
+cancels per-record difficulty variance, so it picks up far smaller real
+differences. We call a difference significant only when the 95% CI on the delta
+excludes 0 on the improvement side.
 
-This module does the correct PAIRED test: on the SAME records scored by BOTH models,
-take the per-record delta (b - a) and bootstrap its mean. Pairing cancels per-record
-difficulty variance, so it detects far smaller real differences than an unpaired
-comparison. A difference is called significant only when the 95% bootstrap CI on the
-delta excludes 0 on the improvement side.
-
-Reuses corpo_reward.verifiable_components for per-record (caught / recall / fp_rate /
-grounding) so semantics are IDENTICAL to score_v5 and the training reward. match_fn /
-count_fn are injectable (DeepSeek matcher in production, fakes in tests).
+Per-record scoring goes through corpo_reward.verifiable_components so semantics
+match score_v5 and the training reward exactly. match_fn / count_fn are
+injectable (DeepSeek matcher in production, fakes in tests).
 
 CLI:
     python compare_recall.py \\
@@ -54,12 +48,12 @@ def paired_delta(
     seed: int = 0,
     max_workers: int = 16,
 ) -> dict:
-    """Paired bootstrap of (model_b - model_a) on recall (labeled), fp_rate (clean), halluc (all).
+    """Bootstrap the paired (b - a) delta for recall, fp_rate, and halluc.
 
-    Only instance_ids present in BOTH prediction sets are compared. Each record is
-    scored for both models with verifiable_components (same matcher/counter), then the
-    per-record delta is bootstrapped. `*_significant` is True iff the 95% CI shows a
-    real IMPROVEMENT: recall CI lower bound > 0; fp/halluc CI upper bound < 0.
+    Only instance_ids in both prediction sets are compared. recall is over
+    labeled records, fp_rate over clean ones, halluc over all. `*_significant`
+    is True only when the 95% CI shows a real improvement: recall lower bound
+    > 0; fp/halluc upper bound < 0.
     """
     a_by = {r["instance_id"]: r for r in preds_a}
     b_by = {r["instance_id"]: r for r in preds_b}
@@ -83,6 +77,7 @@ def paired_delta(
     for defects, ca, cb in scored:
         ha, hb = 1.0 - ca["grounding"], 1.0 - cb["grounding"]
         hall_a.append(ha); hall_b.append(hb); halluc_d.append(hb - ha)
+        # labeled records score recall; clean records score false-positive rate
         if defects:
             recalls_a.append(ca["recall"]); recalls_b.append(cb["recall"])
             recall_d.append(cb["recall"] - ca["recall"])
@@ -93,7 +88,7 @@ def paired_delta(
     rng = np.random.RandomState(seed)
 
     def _boot_ci(deltas):
-        """Return (observed_mean_delta, ci_lo, ci_hi) via paired bootstrap of the mean."""
+        """Paired bootstrap of the mean delta; returns (observed, ci_lo, ci_hi)."""
         if not deltas:
             return None, None, None
         arr = np.asarray(deltas, dtype=float)

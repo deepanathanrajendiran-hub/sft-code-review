@@ -1,0 +1,172 @@
+{
+  "models": [
+    "Base",
+    "SFT",
+    "GRPO"
+  ],
+  "base_model": "Qwen2.5-Coder-7B-Instruct",
+  "eval_samples": 200,
+  "judge": "claude-haiku-4-5-20251001",
+  "pass_thresholds": {
+    "pass_at_1": 7,
+    "pass_at_1_strict": 8
+  },
+  "metrics": {
+    "Base": {
+      "bleu4": 0.008089861909777181,
+      "rouge1": 0.18381370473446526,
+      "rouge2": 0.05429914829757416,
+      "rougeL": 0.12673805904477117,
+      "haiku_mean": 4.44,
+      "pass_at_1": 0.06,
+      "pass_at_1_strict": 0.005,
+      "issue_detection": 0.965,
+      "specificity_rate": 0.965,
+      "hallucination": 0.115,
+      "length_mean": 1194.98,
+      "length_median": 1209.5,
+      "length_p95": 1327.05
+    },
+    "SFT": {
+      "bleu4": 0.03367488737459601,
+      "rouge1": 0.31914096325146984,
+      "rouge2": 0.11545642690487128,
+      "rougeL": 0.23346890761335323,
+      "haiku_mean": 4.245,
+      "pass_at_1": 0.145,
+      "pass_at_1_strict": 0.065,
+      "issue_detection": 0.945,
+      "specificity_rate": 0.945,
+      "hallucination": 0.345,
+      "length_mean": 260.56,
+      "length_median": 261.5,
+      "length_p95": 409.04999999999995
+    },
+    "GRPO": {
+      "bleu4": 0.0,
+      "rouge1": 0.0,
+      "rouge2": 0.0,
+      "rougeL": 0.0,
+      "haiku_mean": 6.445,
+      "pass_at_1": 0.595,
+      "pass_at_1_strict": 0.51,
+      "issue_detection": 0.0,
+      "specificity_rate": 0.0,
+      "hallucination": 0.0,
+      "length_mean": 0.0,
+      "length_median": 0.0,
+      "length_p95": 0.0
+    }
+  },
+  "pairwise_win_rates": {
+    "SFT_vs_Base": {
+      "a_wins": 0.715,
+      "b_wins": 0.195,
+      "ties": 0.09
+    },
+    "GRPO_vs_Base": {
+      "a_wins": 0.38,
+      "b_wins": 0.53,
+      "ties": 0.09
+    },
+    "GRPO_vs_SFT": {
+      "a_wins": 0.14,
+      "b_wins": 0.775,
+      "ties": 0.085
+    }
+  },
+  "pairwise_ci95": {
+    "SFT_vs_Base": {
+      "point": 0.715,
+      "lo": 0.65,
+      "hi": 0.775
+    },
+    "GRPO_vs_Base": {
+      "point": 0.38,
+      "lo": 0.315,
+      "hi": 0.445
+    },
+    "GRPO_vs_SFT": {
+      "point": 0.14,
+      "lo": 0.09,
+      "hi": 0.195
+    }
+  },
+  "judge_reliability_agreement": 0.74,
+  "regression": {
+    "sft": {
+      "label": "SFT  vs Base",
+      "improved": 62,
+      "regressed": 86,
+      "tied": 52,
+      "net": -24,
+      "net_rate": -0.12,
+      "mean_delta": -0.195
+    },
+    "grpo": {
+      "label": "GRPO vs Base",
+      "improved": 147,
+      "regressed": 29,
+      "tied": 24,
+      "net": 118,
+      "net_rate": 0.59,
+      "mean_delta": 2.005
+    }
+  },
+  "failure_patterns": {
+    "first_removal": {
+      "base_pass_rate": 1.0,
+      "sft_pass_rate": 1.0,
+      "grpo_pass_rate": 0.0,
+      "n": 3
+    },
+    "magic_numbers": {
+      "base_pass_rate": 1.0,
+      "sft_pass_rate": 1.0,
+      "grpo_pass_rate": 0.0,
+      "n": 3
+    },
+    "boolean_string": {
+      "base_pass_rate": 1.0,
+      "sft_pass_rate": 1.0,
+      "grpo_pass_rate": 0.0,
+      "n": 3
+    },
+    "django_patterns": {
+      "base_pass_rate": 1.0,
+      "sft_pass_rate": 1.0,
+      "grpo_pass_rate": 0.0,
+      "n": 3
+    },
+    "flask_fastapi_security": {
+      "base_pass_rate": 1.0,
+      "sft_pass_rate": 1.0,
+      "grpo_pass_rate": 0.0,
+      "n": 3
+    },
+    "js_async_bugs": {
+      "base_pass_rate": 1.0,
+      "sft_pass_rate": 1.0,
+      "grpo_pass_rate": 0.0,
+      "n": 3
+    },
+    "null_handling": {
+      "base_pass_rate": 1.0,
+      "sft_pass_rate": 1.0,
+      "grpo_pass_rate": 0.0,
+      "n": 3
+    },
+    "resource_leaks": {
+      "base_pass_rate": 1.0,
+      "sft_pass_rate": 1.0,
+      "grpo_pass_rate": 0.0,
+      "n": 3
+    },
+    "no_issue_diffs": {
+      "base_pass_rate": 1.0,
+      "sft_pass_rate": 1.0,
+      "grpo_pass_rate": 0.0,
+      "n": 3
+    }
+  }
+}

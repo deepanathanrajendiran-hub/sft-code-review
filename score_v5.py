@@ -1,8 +1,8 @@
 """Judge-independent v5 scorer: defect-recall + hallucination on clean labels.
 
-This is BOTH the success metric for the goal ("beat v4 with <= v4 hallucination")
-and the RL variance pre-flight precursor — it answers "does v4 have recall headroom,
-and is v5 actually better?" without any gameable quality judge.
+Doubles as the goal's success metric ("beat v4 with <= v4 hallucination") and the
+RL pre-flight check — does v4 have recall headroom, and is v5 actually better? — with
+no gameable quality judge in the loop.
 
   defect_recall_labeled : caught/known on records WITH defects (the "beat v4" half)
   precision_labeled     : caught/claims on those records (anti-shotgun)
@@ -29,17 +29,12 @@ from corpo_reward import verifiable_components
 
 def score(preds: list[dict], labels: dict[str, list[dict]], pred_field: str,
           match_fn=None, count_fn=None, max_workers: int = 16) -> dict:
-    """Precision-aware judge-independent scoring against clean defect labels.
+    """Score one pred field against clean defect labels.
 
-    Parallelized 16-wide over records (each record makes ~1 claim-count + ~1 matcher
-    call per defect; serial scoring of 632 records is ~30-60 min, parallel ~3-5 min).
+    Threaded because each record fires a claim-count plus a matcher call per defect;
+    serial over 632 records is ~30-60 min, 16-wide is ~3-5 min.
 
-    Returns the goal-relevant signals, separated (never a single gameable blend):
-      defect_recall_labeled : caught/known on records WITH defects (the "beat v4" half)
-      precision_labeled     : caught/claims on those records (anti-shotgun)
-      fp_rate_clean         : fraction of CLEAN records where the model invented a defect
-      halluc_mean           : backticked-identifier hallucination over all records
-      reward_mean           : the composite v5 reward (what training optimizes)
+    The signals are kept separate on purpose — never blended into one gameable number.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -57,6 +52,7 @@ def score(preds: list[dict], labels: dict[str, list[dict]], pred_field: str,
     for defects, c in scored:
         rewards.append(c["reward"])
         hallucs.append(1.0 - c["grounding"])
+        # recall/precision only meaningful where a defect exists; clean records feed fp_rate
         if defects:
             recalls.append(c["recall"])
             precisions.append(c["precision"])

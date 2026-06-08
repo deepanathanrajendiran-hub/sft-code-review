@@ -1,6 +1,6 @@
 # Experiments & Methodology
 
-This is the full technical log: the data pipeline, the evaluation harness (the reusable part), and the RL experiments that produced a negative result. For chronological detail see [`journal.md`](../journal.md); for the metrics tables see [`RESULTS.md`](RESULTS.md).
+This is the full technical log: the data pipeline, the evaluation harness (the reusable part), and the RL experiments that produced a negative result. For the metrics tables see [`RESULTS.md`](RESULTS.md).
 
 ## Contents
 - [Data pipeline: two-call reconciliation](#data-pipeline-two-call-reconciliation)
@@ -68,7 +68,7 @@ Single-stage SFT, no preference optimization. (DPO was tried twice — v4, v5-DP
 
 ### In-distribution (judge-based)
 
-`untitled folder/eval.ipynb` — vLLM generation for base + SFT, then: 3-vote Haiku pairwise with bootstrap CI, absolute Haiku scoring, ROUGE/BLEU vs reference, a no-issue probe, a 9-pattern × 3 failure-mode suite, a prompt-engineering gauntlet (v4 vs few-shot CoT on the same base), and a per-repo breakdown. Empty-review-bug and single-vote issues from the v3 era were patched here.
+`eval/eval.ipynb` — vLLM generation for base + SFT, then: 3-vote Haiku pairwise with bootstrap CI, absolute Haiku scoring, ROUGE/BLEU vs reference, a no-issue probe, a 9-pattern × 3 failure-mode suite, a prompt-engineering gauntlet (v4 vs few-shot CoT on the same base), and a per-repo breakdown. Empty-review-bug and single-vote issues from the v3 era were patched here.
 
 ### Out-of-distribution (judge-independent) — the reusable harness
 

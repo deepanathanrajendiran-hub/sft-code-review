@@ -1,13 +1,9 @@
-"""OOD evaluation runner for code-review LoRAs.
+"""OOD eval runner for the code-review LoRAs.
 
-Primary use: invoke as a CLI script via `python run_ood_eval.py ...` to
-generate predictions and compute metrics on the SWE-CARE eval set.
-
-The module is also safe to import — specifically, `_extract_review` is
-used by `corpo_reward.py` as a library helper for reward-time review
-extraction. Heavy dependencies (vLLM, transformers) are imported inside
-function bodies, not at module load, so importing this file has no side
-effects beyond stdlib imports.
+Run as a CLI to generate predictions and metrics on the SWE-CARE eval set.
+Also importable: corpo_reward.py reuses `_extract_review` at reward time. The
+heavy deps (vLLM, transformers) are imported inside functions, so importing
+this module pulls in nothing but stdlib.
 """
 from __future__ import annotations
 
@@ -19,14 +15,11 @@ from pathlib import Path
 from typing import Any
 
 
-
-
 def _extract_review(raw: str) -> str:
-    """Extract the `<review>` block from a generated trace.
+    """Pull the `<review>` block out of a generated trace.
 
-    1. Primary: `<review>` after the last `</think>`.
-    2. Secondary: last `<review>` block whose content isn't just `...`.
-    3. Fallback: strip `<think>` blocks, return remainder.
+    Prefer the review after the last `</think>`; otherwise the last non-`...`
+    review block; otherwise strip the think blocks and return the rest.
     """
     last_think = raw.rfind("</think>")
     if last_think != -1:
@@ -52,16 +45,15 @@ def _generate(model_path: str, diffs: list[str], tokenizer) -> list[str]:
     SYSTEM_MSG = "You are a Senior Software Engineer reviewing code changes. Provide clear, actionable feedback."
     USER_TEMPLATE = "Review the following code diff and provide feedback:\n```diff\n{diff}\n```"
 
-    # Token budget = max_model_len - max_tokens - safety margin.
-    # COUPLING: this constant assumes max_model_len=8192 (LLM() below) and
-    # max_tokens=4096 (SamplingParams below). If either changes, update this too.
+    # max_model_len - max_tokens - margin. Coupled to the LLM() and
+    # SamplingParams() values below; bump this if either changes.
     INPUT_TOKEN_BUDGET = 8192 - 4096 - 100  # = 3996
 
     def _format_with_budget(diff: str) -> str:
-        """Format a single diff under INPUT_TOKEN_BUDGET, iteratively shrinking on overflow.
+        """Format one diff to fit INPUT_TOKEN_BUDGET, shrinking the char cap on overflow.
 
-        Adversarial diffs (URLs, base64, non-ASCII) can have <2.5 chars/token,
-        so 12000 chars may exceed 4096 tokens. Shrink to 70% and retry until it fits.
+        Adversarial diffs (URLs, base64, non-ASCII) can run under 2.5 chars/token,
+        so even 12000 chars can blow the budget. Retry at 70% until it fits.
         """
         truncated_chars = 12000
         formatted = ""
@@ -76,9 +68,8 @@ def _generate(model_path: str, diffs: list[str], tokenizer) -> list[str]:
             token_count = len(tokenizer.encode(formatted))
             if token_count <= INPUT_TOKEN_BUDGET:
                 return formatted
-            # Over budget — shrink to 70% and retry
             truncated_chars = int(truncated_chars * 0.7)
-        # Hard floor reached — return what we have; vLLM may still fit it
+        # hit the floor; hand it to vLLM anyway, it may still fit
         return formatted
 
     formatted_prompts = [_format_with_budget(diff) for diff in diffs]
@@ -95,7 +86,7 @@ def _generate(model_path: str, diffs: list[str], tokenizer) -> list[str]:
     )
     outputs = llm.generate(formatted_prompts, sp)
     raw_texts = [o.outputs[0].text for o in outputs]
-    # Free GPU memory before next model loads
+    # free the GPU before the next model loads
     del llm
     gc.collect()
     try:
@@ -142,13 +133,13 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     print(f"[run_ood_eval] loaded tokenizer from {args.base_model}", flush=True)
 
-    # Sanity: confirm v4 didn't customize chat_template (would silently confound pairwise)
+    # a customized v4 chat_template would silently confound the pairwise comparison
     v4_tok = AutoTokenizer.from_pretrained(args.v4_model)
     assert v4_tok.chat_template == tokenizer.chat_template, (
         f"v4 chat_template differs from base — would silently confound pairwise. "
         f"Either rebuild v4 with matching template or load tokenizer per-model."
     )
-    del v4_tok  # release; we only need base
+    del v4_tok
     print(f"[run_ood_eval] chat_template matches v4_model: OK", flush=True)
 
     print(f"[run_ood_eval] loading v4 ({args.v4_model})", flush=True)
@@ -158,7 +149,7 @@ def main():
     if not args.skip_base:
         print(f"[run_ood_eval] loading base ({args.base_model})", flush=True)
         base_raw = _generate(args.base_model, diffs, tokenizer)
-        # base doesn't emit <think>/<review>; pass through stripped
+        # base has no <think>/<review> scaffolding; pass it through stripped
         base_extracted = [_extract_review(t) if "<review>" in t else t.strip() for t in base_raw]
     else:
         print(f"[run_ood_eval] --skip-base set; base_pred will be empty strings", flush=True)

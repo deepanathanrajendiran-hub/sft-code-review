@@ -1,12 +1,10 @@
 """Download a SWE-CARE split and emit an OOD eval / training input file.
 
-Supports two splits:
-- ``test`` (671 raw rows) -- the held-out OOD eval set; default for backward compat.
-- ``dev`` (7086 raw rows) -- the larger pool used for CoRPO training prompts.
-
-Both splits go through the same repo-overlap filter: rows whose repository name
-matches one of our 4 training repos (transformers, sklearn, pydantic, fastapi)
-are dropped. Match is by lowercased name suffix; owner is ignored.
+Two splits are available: ``test`` is the held-out OOD eval set (the default),
+``dev`` is the larger pool used for CoRPO training prompts. Both go through the
+same filter that drops rows whose repo matches one of our 4 training repos
+(transformers, sklearn, pydantic, fastapi), matched by lowercased name suffix
+with owner ignored.
 """
 from __future__ import annotations
 
@@ -19,10 +17,7 @@ DEFAULT_TRAIN_REPOS = {"transformers", "sklearn", "scikit-learn", "pydantic", "f
 
 
 def get_train_repo_names(train_jsonl: Path | str) -> set[str]:
-    """Return the set of lowercased repo names found in a training JSONL file.
-
-    Falls back to DEFAULT_TRAIN_REPOS if the file is missing or empty.
-    """
+    """Lowercased repo names from a training JSONL, or DEFAULT_TRAIN_REPOS if missing/empty."""
     p = Path(train_jsonl)
     if not p.exists():
         return set(DEFAULT_TRAIN_REPOS)
@@ -45,11 +40,10 @@ def get_train_repo_names(train_jsonl: Path | str) -> set[str]:
 
 
 def matches_train_repo(swecare_repo: str, train_names: set[str]) -> bool:
-    """True iff the repo name (case-insensitive on swecare_repo) matches any
-    train repo name exactly.
+    """Whether swecare_repo's name matches any train repo.
 
-    Caller MUST pass train_names already lowercased (get_train_repo_names
-    and DEFAULT_TRAIN_REPOS both satisfy this).
+    train_names must already be lowercased (both get_train_repo_names and
+    DEFAULT_TRAIN_REPOS satisfy this).
     """
     name = swecare_repo.split("/", 1)[-1].lower()
     return name in train_names
@@ -84,17 +78,11 @@ def load_and_filter(
     dry_run: int | None = None,
     split: str = "test",
 ) -> list[dict]:
-    """Load a SWE-CARE split, drop overlap, return list of preprocessed rows.
+    """Load a SWE-CARE split, drop repo-overlap rows, return preprocessed rows.
 
-    Args:
-        train_jsonl: Path to training JSONL file used to derive the exclusion repo set.
-        dry_run: If set, only process the first N rows of the split.
-        split: SWE-CARE split name to load. "test" (671 raw rows) is the historical
-            default and is reserved for OOD eval. "dev" (7086 raw rows) is the larger
-            split used for CoRPO training prompts. Both splits go through the same
-            repo-overlap filter.
-
-    If filtered set is < 300 rows, this function logs a warning to stderr.
+    train_jsonl seeds the exclusion repo set. dry_run, if set, limits to the
+    first N rows. split is "test" (OOD eval) or "dev" (CoRPO training prompts);
+    both get the same overlap filter. Warns on stderr if fewer than 300 rows survive.
     """
     from datasets import load_dataset
 

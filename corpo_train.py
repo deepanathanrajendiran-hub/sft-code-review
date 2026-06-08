@@ -17,20 +17,15 @@ Usage:
     # passed to --checkpoint-sync-dir), e.g.:
     #   python corpo_train.py --resume /content/drive/MyDrive/sft/corpo-out-v5/checkpoint-150 [other args]
 
-Safety: refuses to start if --v4-backup does not contain adapter_config.json,
-to prevent accidentally training over the only copy of v4.
-
-This skeleton (Task 12) only provides parse_args + verify_v4_backup. The
-variance-gate, training loop, checkpointing, and Drive sync are added by
-Tasks 13-16.
+Refuses to start if --v4-backup is missing adapter_config.json, so we never train
+over the only copy of v4.
 """
 from __future__ import annotations
 
-# CRITICAL: Unsloth must be imported BEFORE any direct/indirect trl import.
-# vLLM 0.12+ removed GuidedDecodingParams from vllm.sampling_params; TRL 0.22.2
-# still imports it at module-load time. Unsloth's package-init monkey-patches
-# vllm.sampling_params to provide a shim. Wrapped in try/except so local test
-# environments (no unsloth installed) keep working.
+# Unsloth must be imported before anything that pulls in trl. vLLM 0.12+ dropped
+# GuidedDecodingParams from vllm.sampling_params, but TRL 0.22.2 still imports it at
+# module load; Unsloth's init monkey-patches a shim in. try/except keeps local test
+# envs (no unsloth) working.
 try:
     import unsloth  # noqa: F401 — load for its import-time monkey-patches
 except ImportError:
@@ -97,10 +92,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def verify_v4_backup(backup_path: str, adapter_path: str | None = None) -> None:
-    """Refuse to proceed unless backup exists AND is distinct from the adapter to be trained.
+    """Refuse to proceed unless the backup exists and is a distinct path from the adapter.
 
-    adapter_path defaults to None for backward compat with tests that test
-    backup-only checks; production main() always passes it.
+    adapter_path is optional so tests can check the backup alone; main() always passes it.
     """
     p = Path(backup_path)
     if not p.exists():
@@ -120,8 +114,8 @@ def verify_v4_backup(backup_path: str, adapter_path: str | None = None) -> None:
 def _check_variance_gate(rewards: np.ndarray, threshold: float = 0.10) -> tuple[bool, float]:
     """Return (passed, mean_within_group_std).
 
-    rewards: shape (n_prompts, num_generations). Each row = one prompt's G rollouts.
-    threshold: minimum mean within-group std required to consider reward signal usable.
+    rewards is (n_prompts, num_generations) — one row per prompt's G rollouts. threshold
+    is the minimum mean within-group std we need before the reward signal is worth training on.
     """
     if rewards.ndim != 2:
         raise ValueError(f"expected 2D rewards (n_prompts, G), got shape {rewards.shape}")
@@ -130,11 +124,10 @@ def _check_variance_gate(rewards: np.ndarray, threshold: float = 0.10) -> tuple[
     return mean_std >= threshold, mean_std
 
 def run_training(args: argparse.Namespace) -> None:
-    """Run CoRPO training: load v4 adapter, set up trainer, train num_train_epochs.
+    """Load the v4 adapter, build the CoRPO trainer, and train.
 
-    All heavy deps (torch, transformers, peft, trl, datasets) are lazy-imported
-    inside this function. The unit tests for parse_args + verify_v4_backup +
-    _check_variance_gate do NOT need these installed.
+    Heavy deps (torch, transformers, peft, trl, datasets) are lazy-imported here so the
+    unit tests for parse_args / verify_v4_backup / _check_variance_gate don't need them.
     """
     import json
 
@@ -145,7 +138,6 @@ def run_training(args: argparse.Namespace) -> None:
 
     from corpo_trainer import CoRPOTrainer
 
-    # 1. Load training prompts and the clean defect-tuple labels (v5: no opponent)
     with open(args.train_prompts) as fh:
         prompts = [json.loads(line) for line in fh if line.strip()]
     defect_labels = load_defect_labels(args.defect_labels)
@@ -157,12 +149,10 @@ def run_training(args: argparse.Namespace) -> None:
         file=sys.stderr,
     )
 
-    # 2. Load model via FastLanguageModel — canonical Unsloth GRPO path.
-    # `fast_inference=True` attaches a `vllm_engine` attribute to the model,
-    # which Unsloth's patched GRPOTrainer reads (`self.llm = model.vllm_engine`)
-    # in place of standard TRL vLLM colocation. Passing the v4 adapter as
-    # `model_name` lets Unsloth auto-detect the base model from its
-    # adapter_config.json and load both in one shot — already trainable.
+    # fast_inference=True attaches a vllm_engine to the model, which Unsloth's patched
+    # GRPOTrainer reads (self.llm = model.vllm_engine) instead of TRL's vLLM colocation.
+    # Passing the v4 adapter as model_name lets Unsloth auto-detect the base from its
+    # adapter_config.json and load both at once, already trainable.
     print(
         f"[corpo_train] loading v4 adapter ({args.v4_adapter}) via FastLanguageModel",
         file=sys.stderr,
@@ -176,7 +166,7 @@ def run_training(args: argparse.Namespace) -> None:
         gpu_memory_utilization=0.9,
     )
 
-    # 3. Format prompts via chat template (matches run_ood_eval format)
+    # Chat template must match run_ood_eval's format.
     SYSTEM_MSG = (
         "You are a Senior Software Engineer reviewing code changes. "
         "Provide clear, actionable feedback."
@@ -185,17 +175,14 @@ def run_training(args: argparse.Namespace) -> None:
         "Review the following code diff and provide feedback:\n```diff\n{diff}\n```"
     )
 
-    # Char truncation for the diff. vLLM's max_model_len is 8192 (from FastLanguageModel
-    # max_seq_length=8192). Subtract max_completion_length=2048 → 6144 tokens for the
-    # prompt. Allow ~200 tokens for system+template overhead → ~5900 tokens for the
-    # diff. At a conservative 1.5 chars/token for dense code, that's ~8800 chars.
-    # 12000 chars previously crashed at step 32 (a diff tokenized to 8906 tokens —
-    # ~1.35 chars/token). 5000 chars is the safe ceiling: even at 1.0 chars/token
-    # (worst case) it stays under 5000 tokens, well below the 6144 budget.
+    # Diff char cap. max_model_len is 8192; minus max_completion_length=2048 leaves ~6144
+    # tokens for the prompt, minus ~200 for system+template overhead. At a conservative
+    # ~1.0 chars/token (worst case for dense code) 5000 chars stays under the budget.
+    # We've seen a 12000-char diff tokenize to 8906 tokens and crash mid-run, so keep this low.
     DIFF_CHAR_LIMIT = 5000
 
-    # Additionally, filter out any prompt that still produces >6000 tokens after
-    # truncation+templating, so a worst-case diff can't crash the run mid-training.
+    # Even after truncation+templating a pathological diff could exceed budget, so we drop
+    # any prompt still over 6000 tokens rather than risk a crash mid-training.
     def _format(p):
         messages = [
             {"role": "system", "content": SYSTEM_MSG},
@@ -220,11 +207,9 @@ def run_training(args: argparse.Namespace) -> None:
         )
     dataset = Dataset.from_list(formatted)
 
-    # 4. Reward function — verifiable reward against clean defect tuples (v5).
-    # Default match_fn (None) uses defect_match's DeepSeek constrained yes/no judge.
+    # match_fn=None falls back to defect_match's DeepSeek constrained yes/no judge.
     reward_fn = build_reward_fn(defect_labels)
 
-    # 5. Build GRPO config; CoRPOTrainer extends GRPOTrainer
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     grpo_config = GRPOConfig(
@@ -237,11 +222,10 @@ def run_training(args: argparse.Namespace) -> None:
         beta=args.kl_beta,
         num_generations=args.num_generations,
         max_completion_length=args.max_new_tokens,
-        # TRL requires per_device_train_batch_size % num_generations == 0 (the device
-        # micro-batch holds one prompt's G completions). So pdtbs = num_generations
-        # (one prompt's group per micro-step) and gradient_accumulation_steps =
-        # prompts_per_step (accumulate that many prompts before an optimizer step).
-        # The old pdtbs=prompts_per_step(4) % num_generations(8) != 0 -> ValueError at init.
+        # TRL needs per_device_train_batch_size % num_generations == 0 (the device
+        # micro-batch holds one prompt's G completions), so pdtbs = num_generations and
+        # gradient_accumulation_steps = prompts_per_step (accumulate that many prompts
+        # before stepping). pdtbs=prompts_per_step would fail this check at init.
         per_device_train_batch_size=args.num_generations,
         gradient_accumulation_steps=args.prompts_per_step,
         num_train_epochs=args.epochs,
@@ -249,12 +233,10 @@ def run_training(args: argparse.Namespace) -> None:
         logging_steps=10,
         temperature=1.0,
         use_vllm=True,
-        # NOTE: vllm_mode intentionally NOT set. Unsloth's patched GRPOTrainer
-        # uses `model.vllm_engine` directly (from FastLanguageModel) rather than
-        # TRL's standard server/colocate paths. The default ("server") is a
-        # no-op when Unsloth's patches are active.
+        # vllm_mode left unset on purpose: Unsloth's patched GRPOTrainer uses
+        # model.vllm_engine directly, so TRL's server/colocate default is a no-op here.
         bf16=True,
-        loss_type="dr_grpo",  # Run #3 fix: length-bias mitigation (arXiv:2503.20783)
+        loss_type="dr_grpo",  # length-bias mitigation (arXiv:2503.20783)
         scale_rewards="none",  # CoRPOTrainer requires this
     )
 
@@ -267,9 +249,8 @@ def run_training(args: argparse.Namespace) -> None:
         r_min_correct=args.r_min_correct,
     )
 
-    # Mirror every saved checkpoint to a persistent location (typically Drive).
-    # Colab session disconnects wipe /content/, so without this any in-session
-    # checkpoints are lost; resume becomes impossible.
+    # Mirror each checkpoint to a persistent path. Colab disconnects wipe /content/, so
+    # without this any in-session checkpoints are lost and resume is impossible.
     if args.checkpoint_sync_dir:
         import shutil as _shutil
         from transformers import TrainerCallback
@@ -297,14 +278,12 @@ def run_training(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
 
-    # 6. Train (resume support added by Task 15)
     print(
         f"[corpo_train] starting training; r_min_correct={args.r_min_correct}",
         file=sys.stderr,
     )
     trainer.train(resume_from_checkpoint=args.resume)
 
-    # 7. Save final adapter to output_dir/final/
     final_path = output_dir / "final"
     trainer.save_model(str(final_path))
     print(f"[corpo_train] saved final adapter to {final_path}", file=sys.stderr)
@@ -317,14 +296,12 @@ def run_training(args: argparse.Namespace) -> None:
         print(f"[corpo_train] copied final adapter to {dest}", file=sys.stderr)
 
 
-
 def main():
     args = parse_args()
     verify_v4_backup(args.v4_backup, args.v4_adapter)
 
-    # Pre-flight: assert TRL exposes loss_type so Dr.GRPO can be applied.
-    # If silently absent, the run would degenerate to default ("bnpo") which
-    # is the source of the length pathology documented in Runs #1 and #2.
+    # Pre-flight: confirm TRL exposes loss_type. If it's silently absent the run falls
+    # back to the default ("bnpo"), which is the length pathology we're trying to avoid.
     import inspect
     from trl import GRPOConfig as _GRPOC
     _trl_params = inspect.signature(_GRPOC).parameters
@@ -336,9 +313,8 @@ def main():
         )
     print("[corpo_train] pre-flight: TRL exposes loss_type ✓", file=sys.stderr)
 
-    # GRPO requires per_device_train_batch_size % num_generations == 0. run_training sets
-    # pdtbs = num_generations, so this holds structurally; gradient_accumulation_steps =
-    # prompts_per_step accumulates that many prompts per optimizer step.
+    # run_training sets pdtbs = num_generations so the divisibility constraint holds
+    # structurally; just echo the resulting batch shape.
     print(
         f"[corpo_train] pre-flight: batch ok (pdtbs=num_generations={args.num_generations}, "
         f"grad_accum=prompts_per_step={args.prompts_per_step}) ✓",
@@ -357,15 +333,13 @@ def _generate_v4_rollouts(
     num_generations: int,
     max_new_tokens: int,
 ) -> list[list[str]]:
-    """vLLM-generate num_generations RAW rollouts per prompt using base + v4 LoRA.
+    """vLLM-generate num_generations raw rollouts per prompt using base + v4 LoRA.
 
-    Returns list of length len(prompts), each containing num_generations RAW
-    completion strings (with <think>/<review>). The variance gate scores these via
-    verifiable_reward, which extracts internally — so the gate must NOT pre-extract
-    (doing so was a double-extraction skew vs. training). Diff truncation (5000 chars)
-    and temperature=1.0 match run_training exactly for a faithful pre-flight.
-
-    Lazy-imports vLLM and transformers — only invoked when running on Colab GPU.
+    Returns one list per prompt of num_generations raw completion strings (with
+    <think>/<review>). The gate scores these via verifiable_reward, which extracts
+    internally, so we must NOT pre-extract here (that was a double-extraction skew vs
+    training). Diff truncation (5000 chars) and temperature=1.0 match run_training so the
+    pre-flight is faithful. vLLM/transformers are lazy-imported (Colab GPU only).
     """
     import gc
 
@@ -393,21 +367,20 @@ def _generate_v4_rollouts(
         gpu_memory_utilization=0.85,
         max_model_len=8192,
         enable_lora=True,
-        max_lora_rank=64,  # v4 uses r=32, alpha=64; max_lora_rank must be >= rank
+        max_lora_rank=64,  # v4 is r=32, alpha=64; max_lora_rank must be >= rank
     )
     sp = SamplingParams(
         temperature=1.0,
         max_tokens=max_new_tokens,
         n=num_generations,
-        # NOTE: repetition_penalty intentionally omitted (defaults to 1.0).
-        # TRL's GRPOTrainer also uses 1.0 during training, so the variance gate
-        # must match training sampling exactly to be a faithful pre-flight check.
+        # repetition_penalty left at default 1.0 to match TRL's training sampling — the
+        # gate has to sample exactly like training to be a faithful pre-flight.
     )
     lora_request = LoRARequest("v4", 1, adapter_path)
     outputs = llm.generate(formatted, sp, lora_request=lora_request)
     result: list[list[str]] = []
     for o in outputs:
-        rollouts = [comp.text for comp in o.outputs]  # RAW; reward extracts internally
+        rollouts = [comp.text for comp in o.outputs]  # raw; reward extracts internally
         result.append(rollouts)
 
     del llm
@@ -421,21 +394,16 @@ def _generate_v4_rollouts(
 
 
 def run_variance_gate(args: argparse.Namespace) -> bool:
-    """Generate 8 rollouts × 50 prompts with v4 policy; check reward spread.
+    """Generate G rollouts × up to 50 prompts with the v4 policy and check reward spread.
 
-    Generates `args.num_generations` rollouts for each of up to 50 random training
-    prompts using the v4 LoRA via vLLM, scores them with `verifiable_reward`, and
-    inspects the within-group reward std as a signal-strength check. Also prints
-    a histogram and percentile-based R_min suggestions so the operator can pick
-    a calibrated `--r-min-correct` value for the actual training run.
-
-    Returns True if mean within-group std >= 0.10. Side effect: writes a verdict,
-    histogram, and percentile candidates to stderr.
+    Scores the rollouts with verifiable_reward and inspects the within-group reward std
+    as a signal-strength check. Also prints a histogram and percentile-based R_min
+    candidates so the operator can pick a calibrated --r-min-correct for the real run.
+    Returns True if mean within-group std >= 0.10; writes the verdict to stderr either way.
     """
     import json
     import random
 
-    # Load 50 random train prompts
     with open(args.train_prompts) as fh:
         all_prompts = [json.loads(line) for line in fh if line.strip()]
     rng = random.Random(42)
@@ -450,7 +418,7 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
 
     from concurrent.futures import ThreadPoolExecutor
 
-    # Score the RAW rollout (verifiable_reward extracts once internally) so the gate
+    # Score the raw rollout (verifiable_reward extracts once internally) so the gate
     # measures exactly what training measures — no double-extraction skew.
     def _score_one(work_item):
         i, j, prompt, rollout = work_item
@@ -475,10 +443,9 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
     for h, e in zip(hist, edges[:-1]):
         print(f"  [{e:.1f}, {e+0.1:.1f}): {'#' * min(h, 60)}  ({h})", file=sys.stderr)
 
-    # R_min calibration: CoRPO paper sets R_min at the correctness boundary
-    # (below median of correct rollouts, above max of incorrect). For continuous
-    # composite rewards in [0,1], pick from the rollout distribution itself —
-    # NOT an aspirational quality target. Default recommendation: p33.
+    # The CoRPO paper sets R_min at the correctness boundary (below the median of correct
+    # rollouts, above the max of incorrect). For continuous [0,1] rewards we read it off
+    # the rollout distribution rather than picking an aspirational target; p33 by default.
     p25, p33, p40, p50 = np.percentile(rewards.ravel(), [25, 33, 40, 50])
     if not passed:
         print(
@@ -501,8 +468,8 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
 def load_defect_labels(path) -> dict[str, list[dict]]:
     """Load clean defect tuples keyed by instance_id (built by label_defects.py).
 
-    JSONL: one {"instance_id": ..., "defects": [{path,line,issue_type,canonical_desc}, ...]}
-    per line. An empty "defects" list marks a clean diff (model should find nothing).
+    One JSON object per line; an empty "defects" list marks a clean diff (the model
+    should find nothing).
     """
     import json
     labels: dict[str, list[dict]] = {}
@@ -517,12 +484,12 @@ def load_defect_labels(path) -> dict[str, list[dict]]:
 
 
 def build_reward_fn(defect_labels: dict[str, list[dict]], match_fn=None):
-    """Return a TRL-compatible reward closure scoring each completion with verifiable_reward.
+    """Return a TRL-compatible reward closure that scores completions with verifiable_reward.
 
-    TRL calls reward_fn(prompts, completions, **kwargs); kwargs carries the dataset
+    TRL calls reward_fn(prompts, completions, **kwargs), where kwargs carries the dataset
     columns (instance_id, diff) replicated per completion. Each completion is scored
-    against its instance's clean defect tuples (a missing instance => clean diff, []).
-    Semantic-matcher calls are parallelized (16 workers); match_fn is injectable for tests.
+    against its instance's defect tuples (a missing instance means a clean diff, []).
+    Matcher calls run on 16 workers; match_fn is injectable for tests.
     """
     from concurrent.futures import ThreadPoolExecutor
 

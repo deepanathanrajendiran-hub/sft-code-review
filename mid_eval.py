@@ -1,13 +1,12 @@
-"""Subprocess mid-eval: LoRA-swap generate over v5 checkpoints, score vs the v4 bar.
+"""Mid-training eval: sweep the v5 checkpoints, score each against the v4 bar.
 
-MUST run as a subprocess (`python mid_eval.py ...`), NOT inside a Colab/Jupyter cell:
-vLLM v1's engine calls sys.stdout.fileno(), which a notebook's stdout doesn't support
-(io.UnsupportedOperation: fileno). A subprocess has a real stdout, so this works — same
-reason the variance gate and run_ood_eval are invoked via `!python`.
+Must be run as a subprocess (`python mid_eval.py ...`), not inside a notebook
+cell: vLLM v1's engine calls sys.stdout.fileno(), which a notebook stdout doesn't
+support (io.UnsupportedOperation: fileno). Same reason we shell out for the
+variance gate and run_ood_eval.
 
-Generates `n_samples` fixed prompts once, then swaps each checkpoint's LoRA in (no
-re-merge per checkpoint), scores with score_v5 (precision-aware, judge-independent),
-and prints defect_recall / fp_rate / halluc vs v4 for each checkpoint.
+Builds the prompt set once, then hot-swaps each checkpoint's LoRA (no per-checkpoint
+re-merge) and scores with score_v5, reporting defect_recall / fp_rate / halluc vs v4.
 """
 from __future__ import annotations
 
