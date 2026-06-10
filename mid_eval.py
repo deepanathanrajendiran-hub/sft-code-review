@@ -5,8 +5,11 @@ cell: vLLM v1's engine calls sys.stdout.fileno(), which a notebook stdout doesn'
 support (io.UnsupportedOperation: fileno). Same reason we shell out for the
 variance gate and run_ood_eval.
 
-Builds the prompt set once, then hot-swaps each checkpoint's LoRA (no per-checkpoint
-re-merge) and scores with score_v5, reporting defect_recall / fp_rate / halluc vs v4.
+Builds the prompt set once (same 12000-char budgeted regime as run_ood_eval, so
+the comparison vs the v4 preds is apples-to-apples), then hot-swaps each
+checkpoint's LoRA over MERGED v4 (v5.2+ checkpoints are deltas on merged-v4
+weights, not on the raw base — no per-checkpoint re-merge) and scores with
+score_v5, reporting defect_recall / fp_rate / halluc vs v4.
 """
 from __future__ import annotations
 
@@ -30,7 +33,12 @@ def main():
     ap.add_argument("--checkpoint-root", required=True, help="dir holding checkpoint-N subdirs (Drive mirror)")
     ap.add_argument("--v4-preds", required=True, help="ood_preds_v4.jsonl (provides the fixed sample + v4_pred bar)")
     ap.add_argument("--labels", required=True, help="defect_labels_eval.jsonl")
-    ap.add_argument("--base-model", default="unsloth/Qwen2.5-Coder-7B-Instruct")
+    ap.add_argument("--v4-merged", required=True,
+                    help="Merged v4 model dir. v5.2+ checkpoints are LoRA deltas ON MERGED V4 "
+                         "(training loads merged-v4 + fresh LoRA), so they must be hot-swapped "
+                         "over merged v4 — swapping over the raw base evaluates the wrong model.")
+    ap.add_argument("--base-model", default="unsloth/Qwen2.5-Coder-7B-Instruct",
+                    help="Used only for the tokenizer (chat template matches v4's)")
     ap.add_argument("--n-samples", type=int, default=50)
     args = ap.parse_args()
 
@@ -41,7 +49,7 @@ def main():
     from vllm.lora.request import LoRARequest
 
     import score_v5
-    from run_ood_eval import _extract_review
+    from run_ood_eval import _extract_review, format_prompt_with_budget
 
     labels = {}
     for line in open(args.labels):
@@ -66,17 +74,12 @@ def main():
         return
 
     tok = AutoTokenizer.from_pretrained(args.base_model)
-    SYS = "You are a Senior Software Engineer reviewing code changes. Provide clear, actionable feedback."
-    UT = "Review the following code diff and provide feedback:\n```diff\n{diff}\n```"
-    prompts = [
-        tok.apply_chat_template(
-            [{"role": "system", "content": SYS},
-             {"role": "user", "content": UT.format(diff=r["diff"][:5000])}],
-            tokenize=False, add_generation_prompt=True)
-        for r in sample
-    ]
+    # Same prompt regime as run_ood_eval generated the v4 bar with (12000-char budgeted
+    # truncation). The old flat diff[:5000] cap gave checkpoints less context than the
+    # v4 preds they were compared against.
+    prompts = [format_prompt_with_budget(r["diff"], tok) for r in sample]
 
-    llm = LLM(model=args.base_model, gpu_memory_utilization=0.85, max_model_len=8192,
+    llm = LLM(model=args.v4_merged, gpu_memory_utilization=0.85, max_model_len=8192,
               enable_lora=True, max_lora_rank=64)
     sp = SamplingParams(temperature=0, max_tokens=4096, repetition_penalty=1.1)
 

@@ -170,3 +170,25 @@ class TestResumeAndCopyFlags:
     def test_copy_to_default_is_none(self):
         args = parse_args(REQUIRED)
         assert args.copy_to is None
+
+class TestLoadDefectLabelsAmbiguous:
+    def test_skips_ambiguous_records(self, tmp_path):
+        # no grounded defects but >=1 ungrounded comment -> not loaded at all
+        # (treating it as clean would punish the model for flagging a real defect)
+        p = tmp_path / "labels.jsonl"
+        p.write_text(
+            json.dumps({"instance_id": "amb", "defects": [], "n_ungrounded": 2}) + "\n"
+            + json.dumps({"instance_id": "clean", "defects": [], "n_ungrounded": 0}) + "\n"
+            + json.dumps({"instance_id": "labeled", "n_ungrounded": 3, "defects": [
+                {"path": "a.py", "line": 1, "issue_type": "bug", "canonical_desc": "x"}]}) + "\n"
+        )
+        labels = load_defect_labels(p)
+        assert "amb" not in labels
+        assert labels["clean"] == []
+        assert len(labels["labeled"]) == 1  # grounded defects win even with ungrounded extras
+
+    def test_old_format_without_n_ungrounded_kept(self, tmp_path):
+        p = tmp_path / "labels.jsonl"
+        p.write_text(json.dumps({"instance_id": "old", "defects": []}) + "\n")
+        labels = load_defect_labels(p)
+        assert labels == {"old": []}

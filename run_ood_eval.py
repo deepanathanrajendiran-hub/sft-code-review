@@ -42,37 +42,7 @@ def _extract_review(raw: str) -> str:
 def _generate(model_path: str, diffs: list[str], tokenizer) -> list[str]:
     from vllm import LLM, SamplingParams
 
-    SYSTEM_MSG = "You are a Senior Software Engineer reviewing code changes. Provide clear, actionable feedback."
-    USER_TEMPLATE = "Review the following code diff and provide feedback:\n```diff\n{diff}\n```"
-
-    # max_model_len - max_tokens - margin. Coupled to the LLM() and
-    # SamplingParams() values below; bump this if either changes.
-    INPUT_TOKEN_BUDGET = 8192 - 4096 - 100  # = 3996
-
-    def _format_with_budget(diff: str) -> str:
-        """Format one diff to fit INPUT_TOKEN_BUDGET, shrinking the char cap on overflow.
-
-        Adversarial diffs (URLs, base64, non-ASCII) can run under 2.5 chars/token,
-        so even 12000 chars can blow the budget. Retry at 70% until it fits.
-        """
-        truncated_chars = 12000
-        formatted = ""
-        while truncated_chars >= 200:
-            messages = [
-                {"role": "system", "content": SYSTEM_MSG},
-                {"role": "user", "content": USER_TEMPLATE.format(diff=diff[:truncated_chars])},
-            ]
-            formatted = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            token_count = len(tokenizer.encode(formatted))
-            if token_count <= INPUT_TOKEN_BUDGET:
-                return formatted
-            truncated_chars = int(truncated_chars * 0.7)
-        # hit the floor; hand it to vLLM anyway, it may still fit
-        return formatted
-
-    formatted_prompts = [_format_with_budget(diff) for diff in diffs]
+    formatted_prompts = [format_prompt_with_budget(diff, tokenizer) for diff in diffs]
 
     llm = LLM(
         model=model_path,
@@ -165,6 +135,43 @@ def main():
             }
             fh.write(json.dumps(out_row) + "\n")
     print(f"[run_ood_eval] wrote {len(rows)} predictions to {out_path}", flush=True)
+
+
+SYSTEM_MSG = "You are a Senior Software Engineer reviewing code changes. Provide clear, actionable feedback."
+USER_TEMPLATE = "Review the following code diff and provide feedback:\n```diff\n{diff}\n```"
+
+# max_model_len - max_tokens - margin. Coupled to the LLM() and SamplingParams()
+# values in _generate; bump this if either changes.
+INPUT_TOKEN_BUDGET = 8192 - 4096 - 100  # = 3996
+
+
+def format_prompt_with_budget(diff: str, tokenizer, input_token_budget: int = INPUT_TOKEN_BUDGET) -> str:
+    """Format one diff to fit input_token_budget, shrinking the char cap on overflow.
+
+    Adversarial diffs (URLs, base64, non-ASCII) can run under 2.5 chars/token,
+    so even 12000 chars can blow the budget. Retry at 70% until it fits.
+
+    Module-level (not nested in _generate) so mid_eval.py can build checkpoint
+    prompts with the EXACT regime the v4 baseline preds were generated under —
+    a 5000-char flat cap there vs 12000 budgeted here made every pre-v5.2
+    mid-eval comparison unfair to the checkpoint side.
+    """
+    truncated_chars = 12000
+    formatted = ""
+    while truncated_chars >= 200:
+        messages = [
+            {"role": "system", "content": SYSTEM_MSG},
+            {"role": "user", "content": USER_TEMPLATE.format(diff=diff[:truncated_chars])},
+        ]
+        formatted = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        token_count = len(tokenizer.encode(formatted))
+        if token_count <= input_token_budget:
+            return formatted
+        truncated_chars = int(truncated_chars * 0.7)
+    # hit the floor; hand it to vLLM anyway, it may still fit
+    return formatted
 
 
 if __name__ == "__main__":

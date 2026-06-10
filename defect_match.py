@@ -62,12 +62,12 @@ def deepseek_defect_match_judge(review: str, defect: dict) -> bool:
         "Answer with exactly one word: YES or NO."
     )
     # match ood_metrics' convention: V4-Pro with thinking disabled (~3x faster).
-    resp = client.chat.completions.create(
+    resp = _with_retries(lambda: client.chat.completions.create(
         model=DEEPSEEK_V4_PRO,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=4,
         extra_body={"thinking": {"type": "disabled"}},
-    )
+    ))
     answer = (resp.choices[0].message.content or "").strip().upper()
     return answer.startswith("Y")
 
@@ -86,12 +86,12 @@ def deepseek_count_claims(review: str) -> int:
         "praise, questions, or general remarks. Reply with ONLY an integer.\n\n"
         f"REVIEW:\n{review[:1500]}"
     )
-    resp = client.chat.completions.create(
+    resp = _with_retries(lambda: client.chat.completions.create(
         model=DEEPSEEK_V4_PRO,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=4,
         extra_body={"thinking": {"type": "disabled"}},
-    )
+    ))
     import re as _re
     m = _re.search(r"\d+", resp.choices[0].message.content or "")
     return int(m.group()) if m else 0
@@ -99,3 +99,24 @@ def deepseek_count_claims(review: str) -> int:
 
 # module-level binding so tests can patch the claim-counter (mirrors _match_fn)
 _count_fn = deepseek_count_claims
+
+def _with_retries(call, attempts: int = 5, base_delay: float = 2.0):
+    """Run an API call with exponential backoff (2s, 4s, 8s, 16s between tries).
+
+    The reward path fires thousands of matcher/counter calls from inside the
+    training loop; before this, one transient DeepSeek error propagated through
+    the ThreadPoolExecutor and killed a multi-hour run. Persistent failure
+    (all attempts exhausted) still raises — a silent default would corrupt
+    rewards instead.
+    """
+    import time
+
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return call()
+        except Exception as exc:  # noqa: BLE001 — provider SDK errors vary
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(base_delay * (2 ** attempt))
+    raise last_exc
