@@ -520,10 +520,32 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
     for h, e in zip(hist, edges[:-1]):
         print(f"  [{e:.1f}, {e+0.1:.1f}): {'#' * min(h, 60)}  ({h})", file=sys.stderr)
 
+    # Diagnose the zero-reward mass: hard 0s are format failures (truncated <think>
+    # or empty extraction), not "low quality". They are excluded from the R_min
+    # percentiles below — a >33% point mass at 0 made pooled p33 = 0.000, and
+    # R_min=0 never clamps a non-negative reward (CoRPO degenerates to plain GRPO).
+    flat = rewards.ravel()
+    zero_mask = flat < 1e-9
+    n_zero = int(zero_mask.sum())
+    if n_zero:
+        n_trunc = sum(
+            1
+            for prompt_rollouts in rollouts_by_prompt
+            for r in prompt_rollouts
+            if "<think>" in r and "</think>" not in r
+        )
+        print(
+            f"[variance-gate] zero-reward rollouts: {n_zero}/{len(flat)} "
+            f"(unclosed <think> i.e. truncated at max-new-tokens: {n_trunc}; "
+            f"empty/other extraction failures: {max(0, n_zero - n_trunc)})",
+            file=sys.stderr,
+        )
+    nonzero = flat[~zero_mask]
+
     # The CoRPO paper sets R_min at the correctness boundary (below the median of correct
     # rollouts, above the max of incorrect). For continuous [0,1] rewards we read it off
-    # the rollout distribution rather than picking an aspirational target; p33 by default.
-    p25, p33, p40, p50 = np.percentile(rewards.ravel(), [25, 33, 40, 50])
+    # the NONZERO rollout distribution (format failures aren't "incorrect reviews",
+    # they're degenerate outputs); p33 by default.
     if not passed:
         print(
             "[variance-gate] WARNING: gate FAILED — rollout distribution is too narrow. "
@@ -531,7 +553,17 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
             "Investigate the reward function or base-sample cache before training.",
             file=sys.stderr,
         )
-    print(f"[variance-gate] R_min candidates (pick from rollout distribution):", file=sys.stderr)
+    if len(nonzero) == 0:
+        print(
+            "[variance-gate] every rollout scored 0 — no R_min candidates. "
+            "Fix the reward/extraction before training.",
+            file=sys.stderr,
+        )
+        print(f"[variance-gate] verdict: FAIL", file=sys.stderr)
+        return False
+    p25, p33, p40, p50 = np.percentile(nonzero, [25, 33, 40, 50])
+    print(f"[variance-gate] R_min candidates (percentiles of NONZERO rewards, n={len(nonzero)}):",
+          file=sys.stderr)
     print(f"  p25={p25:.3f}   p33={p33:.3f}   p40={p40:.3f}   p50={p50:.3f}", file=sys.stderr)
     if passed:
         print(f"  -> recommended default: p33 = {p33:.3f}", file=sys.stderr)
