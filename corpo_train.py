@@ -133,6 +133,40 @@ def _check_variance_gate(rewards: np.ndarray, threshold: float = 0.10) -> tuple[
     mean_std = float(per_group_std.mean())
     return mean_std >= threshold, mean_std
 
+def _make_lora_config_tolerant() -> None:
+    """Make peft.LoraConfig ignore kwargs it doesn't know.
+
+    The installed unsloth is newer than the pinned peft 0.17.1 and passes
+    LoraConfig kwargs that 0.17.1 rejects (e.g. ensure_weight_tying, added in
+    peft 0.18). peft 0.18+ can't be installed against the pinned transformers
+    4.56.2 (its tensor-parallel import needs 4.57+), so we tolerate instead of
+    upgrade. Dropping these is safe here: they only affect embedding/lm_head
+    tying or exotic LoRA variants, and we target attention+MLP modules only.
+    Idempotent; patches the class object, so unsloth's module-level
+    `from peft import LoraConfig` sees it too.
+    """
+    import inspect
+    import peft
+
+    if getattr(peft.LoraConfig, "_kwarg_shim_installed", False):
+        return
+    orig_init = peft.LoraConfig.__init__
+    valid = set(inspect.signature(orig_init).parameters) - {"self"}
+
+    def tolerant_init(self, *a, **kw):
+        dropped = sorted(k for k in kw if k not in valid)
+        if dropped:
+            print(
+                f"[corpo_train] LoraConfig: dropping kwargs unsupported by "
+                f"peft {peft.__version__}: {dropped}",
+                file=sys.stderr,
+            )
+        orig_init(self, *a, **{k: v for k, v in kw.items() if k in valid})
+
+    peft.LoraConfig.__init__ = tolerant_init
+    peft.LoraConfig._kwarg_shim_installed = True
+
+
 def run_training(args: argparse.Namespace) -> None:
     """Load merged-v4 + a fresh LoRA, build the CoRPO trainer, and train.
 
@@ -194,6 +228,7 @@ def run_training(args: argparse.Namespace) -> None:
         max_lora_rank=32,
         gpu_memory_utilization=0.9,
     )
+    _make_lora_config_tolerant()
     model = FastLanguageModel.get_peft_model(
         model,
         r=32,
