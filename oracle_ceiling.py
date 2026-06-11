@@ -40,21 +40,34 @@ ORACLE_USER = "Review the following code diff and provide feedback:\n```diff\n{d
 DIFF_CHAR_BUDGET = 12000
 
 
-def _deepseek_review(diff: str, max_tokens: int = 1200) -> str:
+def _deepseek_review(diff: str, max_tokens: int = 6000) -> str:
     """One diff-only review from V4-Pro. Thinking left ENABLED (default) on purpose —
-    the oracle should get its best shot; we measure the ceiling, not the latency."""
+    the oracle should get its best shot; we measure the ceiling, not the latency.
+
+    max_tokens must cover the REASONING tokens too (DeepSeek bills thinking against
+    it); a small budget gets exhausted mid-think and content comes back empty — the
+    bug that zeroed the first smoke test. If content is still empty, retry once with
+    double the budget.
+    """
     from ood_metrics import _get_deepseek_client, DEEPSEEK_V4_PRO
 
     client = _get_deepseek_client()
-    resp = _with_retries(lambda: client.chat.completions.create(
-        model=DEEPSEEK_V4_PRO,
-        max_tokens=max_tokens,
-        messages=[
-            {"role": "system", "content": ORACLE_SYSTEM},
-            {"role": "user", "content": ORACLE_USER.format(diff=diff[:DIFF_CHAR_BUDGET])},
-        ],
-    ))
-    return (resp.choices[0].message.content or "").strip()
+
+    def _call(budget: int) -> str:
+        resp = _with_retries(lambda: client.chat.completions.create(
+            model=DEEPSEEK_V4_PRO,
+            max_tokens=budget,
+            messages=[
+                {"role": "system", "content": ORACLE_SYSTEM},
+                {"role": "user", "content": ORACLE_USER.format(diff=diff[:DIFF_CHAR_BUDGET])},
+            ],
+        ))
+        return (resp.choices[0].message.content or "").strip()
+
+    review = _call(max_tokens)
+    if not review:
+        review = _call(max_tokens * 2)
+    return review
 
 
 # module-level binding so tests can patch the reviewer (project convention)
@@ -71,27 +84,47 @@ def filter_style(labels: dict[str, list[dict]]) -> dict[str, list[dict]]:
 
 
 def generate_oracle(rows: list[dict], out_path, workers: int = 8,
-                    max_tokens: int = 1200, review_fn=None) -> Path:
-    """Generate oracle reviews for rows missing from out_path (resumable append)."""
+                    max_tokens: int = 6000, review_fn=None) -> Path:
+    """Generate oracle reviews for rows missing from out_path (resumable append).
+
+    Records whose stored oracle_pred is EMPTY are treated as not-done and
+    regenerated — the first smoke test wrote empty reviews (thinking-budget
+    exhaustion) and those must not be skipped on resume.
+    """
     fn = review_fn or _review_fn
     out = Path(out_path)
     done: set[str] = set()
+    kept_lines: list[str] = []
     if out.exists():
         for line in out.open():
-            if line.strip():
-                done.add(json.loads(line)["instance_id"])
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if (rec.get("oracle_pred") or "").strip():
+                done.add(rec["instance_id"])
+                kept_lines.append(line if line.endswith("\n") else line + "\n")
+        # rewrite without the empty records so the file stays one-row-per-instance
+        if len(kept_lines) < sum(1 for l in out.open() if l.strip()):
+            out.write_text("".join(kept_lines))
     todo = [r for r in rows if r["instance_id"] not in done]
     print(f"[oracle] {len(done)} already generated, {len(todo)} to go", file=sys.stderr)
     if not todo:
         return out
+    n_empty = 0
     with out.open("a") as fh, ThreadPoolExecutor(max_workers=workers) as ex:
         for row, review in zip(todo, ex.map(lambda r: fn(r["diff"], max_tokens), todo)):
+            if not (review or "").strip():
+                n_empty += 1
             fh.write(json.dumps({
                 "instance_id": row["instance_id"],
                 "diff": row["diff"],
                 "oracle_pred": review,
             }) + "\n")
             fh.flush()  # line-by-line so an interrupt loses at most one record
+    if n_empty:
+        print(f"[oracle] WARNING: {n_empty}/{len(todo)} reviews came back EMPTY even after "
+              f"the doubled-budget retry — raise --max-tokens and re-run (they'll regenerate)",
+              file=sys.stderr)
     return out
 
 
@@ -108,7 +141,9 @@ def main():
     ap.add_argument("--labels", required=True, help="defect_labels_eval.jsonl")
     ap.add_argument("--output", required=True, help="oracle_preds.jsonl (resumable)")
     ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--max-tokens", type=int, default=1200)
+    ap.add_argument("--max-tokens", type=int, default=6000,
+                    help="MUST cover DeepSeek's reasoning tokens too; small budgets "
+                         "exhaust mid-think and return empty reviews")
     ap.add_argument("--limit", type=int, default=None, help="smoke-test on first N rows")
     ap.add_argument("--score-only", action="store_true", help="skip generation; score existing --output")
     args = ap.parse_args()
@@ -116,6 +151,7 @@ def main():
     rows = _load(args.input)
     if args.limit:
         rows = rows[: args.limit]
+    keep = {r["instance_id"] for r in rows}
 
     labels_raw: dict[str, list[dict]] = {}
     for r in _load(args.labels):
@@ -127,14 +163,13 @@ def main():
 
     if not args.score_only:
         generate_oracle(rows, args.output, workers=args.workers, max_tokens=args.max_tokens)
-    oracle_rows = _load(args.output)
-    if args.limit:
-        keep = {r["instance_id"] for r in rows}
-        oracle_rows = [r for r in oracle_rows if r["instance_id"] in keep]
+    oracle_rows = [r for r in _load(args.output) if r["instance_id"] in keep]
 
     contenders = [("v4", rows, "v4_pred"), ("oracle", oracle_rows, "oracle_pred")]
     if args.v5_preds:
-        contenders.insert(1, ("v5.2", _load(args.v5_preds), "v4_pred"))
+        # restrict v5 preds to the same subset so smoke-test rows are comparable
+        v5_rows = [r for r in _load(args.v5_preds) if r["instance_id"] in keep]
+        contenders.insert(1, ("v5.2", v5_rows, "v4_pred"))
 
     for label_name, labels in (("raw labels", labels_raw), ("style-filtered", labels_nostyle)):
         print(f"\n=== {label_name} ===")

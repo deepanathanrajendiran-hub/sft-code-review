@@ -43,3 +43,16 @@ def test_generate_oracle_resumes_without_regenerating(tmp_path):
     assert calls == ["d2"]  # i1 skipped
     got = {json.loads(l)["instance_id"]: json.loads(l)["oracle_pred"] for l in out.open()}
     assert got == {"i1": "old", "i2": "new"}
+
+def test_generate_oracle_regenerates_empty_records(tmp_path):
+    # an empty oracle_pred (thinking-budget exhaustion) must NOT be treated as done
+    out = tmp_path / "oracle.jsonl"
+    out.write_text(
+        json.dumps({"instance_id": "i1", "diff": "d1", "oracle_pred": ""}) + "\n"
+        + json.dumps({"instance_id": "i2", "diff": "d2", "oracle_pred": "kept"}) + "\n"
+    )
+    rows = [{"instance_id": "i1", "diff": "d1"}, {"instance_id": "i2", "diff": "d2"}]
+    oc.generate_oracle(rows, out, review_fn=lambda diff, max_tokens: f"fresh {diff}")
+    got = {json.loads(l)["instance_id"]: json.loads(l)["oracle_pred"] for l in out.open()}
+    assert got == {"i1": "fresh d1", "i2": "kept"}
+    assert sum(1 for l in out.open() if l.strip()) == 2  # no duplicate i1 rows
