@@ -116,6 +116,30 @@ both models catch real defects that score zero because the human thread discusse
 some "clean" records carry plausible real issues both models independently flag. Recall ≈ 0.09
 measures thread-matching, not bug-finding; label-quality work is the cheapest path to a sharper metric.
 
+### Diff-only oracle ceiling (2026-06-11)
+
+To decide whether the recall plateau is the *task's* ceiling (diff-only context) or the *student's*,
+`oracle_ceiling.py` had DeepSeek V4-Pro (thinking enabled) review the same 632 diffs with the same
+prompt and 12000-char budget, scored by the same matcher on the same labels:
+
+| model | recall | precision | fp_rate (clean) | halluc |
+|---|---|---|---|---|
+| v4 | 0.095 | 0.093 | 0.744 | 0.036 |
+| v5.2 ckpt-150 | 0.115 | 0.118 | 0.650 | 0.029 |
+| **oracle (V4-Pro)** | **0.388** | 0.186 | 0.966 | 0.127 |
+
+*(style-filtered labels shift every number by ≤0.01 — style leakage was not the binding label problem)*
+
+Two conclusions. **First, the task has ~4× recall headroom at diff-only context** — the students are
+training/capability-limited, not context-limited, which makes recall-targeted distillation (the
+oracle is the teacher) the highest-leverage next step, with RL after. **Second, the clean labels are
+substantially incomplete:** even the frontier model "false-alarms" on 97% of label-clean records and
+only 19% of its claims match labels — so fp_rate/precision here measure agreement with one reviewer's
+thread, not error rates. v5.2's fp improvement stands as a behavioral restraint difference, but no
+absolute fp number from this harness should be quoted as a false-alarm rate. (Caveat: the oracle, the
+labeler, and the matcher are all V4-Pro — some same-family phrasing leniency may inflate the ceiling,
+but not plausibly by 4×.)
+
 ---
 
 ## 3. Root cause: the training-data balance
