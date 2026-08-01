@@ -119,13 +119,59 @@ No opponent, no quality judge → the proxy-reward Goodhart overoptimization [8]
 - **v5.1 (F-beta = 2):** rebalanced to favor recall 4× precision, to undo the collapse. At ckpt-75 it produced a **statistical tie** with v4 on every aggregate axis — but the disagreement analysis showed it had slid the *other* way: on 275 records where the models disagreed, v5.1 fabricated a concrete bug v4 correctly waved off **11× in 45 samples** vs 3 real catches. The aggregate hallucination metric (backtick) couldn't see this because the fabrications used real diff identifiers.
 - **v5.1 ckpt-150 (more training):** got **worse** — louder (review length 1027 → 1310, assertions 8.2 → 11.4 per review), recall down (0.094 → 0.080), over-flagging up (138 → 162 solo-asserts), and a new **repetition-loop pathology** (a review emitting "Bug:" hundreds of times) that worsened with training (22 → 29 → 35 records).
 
-### Round 2.5 — v5.2 (built, not run)
+### Round 2.5 — the pipeline audit that changed the story
 
-`corpo_reward.py` was tuned to `RECALL_BETA = 1.5` + steeper clean penalty (0.35) to suppress the over-flagging — a midpoint between v5.0's over-quiet and v5.1's over-loud. It's tested (191 passing) and on the shelf, but the ckpt-150 degeneration (over-flagging + loops) argues against another RL cycle.
+Before running another reward variant, a code review of the pipeline (not the results) found **five
+defects that had invalidated every run above**:
+
+1. **`max_prompt_length` was never set** — TRL's GRPOConfig defaults to 512 and *left-truncates*; with
+   SWE-CARE diffs (median 6.8k chars), ~87% of training prompts lost the system message and most of the
+   diff. The policy was scored on recall against defects it literally could not see — in Runs #1–#3
+   *and* v5.0/v5.1. The variance gate generated full prompts, so it never measured the training regime.
+2. **The KL anchor pointed at base, not v4.** The policy was loaded as base + v4-adapter (a PEFT model),
+   and TRL computes the PEFT reference with adapters disabled — i.e. raw base. `kl_beta=0.02` was
+   actively pulling the policy *away* from v4. Fixed by loading merged-v4 weights + a fresh LoRA.
+3. **Truncated rollouts leaked reasoning into the reward** — an unclosed `<think>` fell through the
+   extractor as the "review" and got partial credit. Now scores 0.
+4. **Ambiguous "clean" labels** — records whose defect comments failed diff-grounding were trained as
+   "find nothing" on diffs with real defects. Now excluded.
+5. **mid-eval prompt asymmetry** — checkpoints got 5000-char diffs vs the v4 baseline's 12000-char
+   budget. Now identical.
+
+The earlier "RL is dead" conclusion was therefore drawn from broken experiments. The elaborate
+root-cause analyses (literature sweeps, adversarial agent passes) had validated *conceptual* causes
+while missing config-default plumbing — the lesson is to inspect the actual tensors entering the
+trainer before reaching for papers.
+
+### Round 3 — v5.2: the fixed-pipeline run (one pre-registered test)
+
+v5.2 = the verifiable reward with `RECALL_BETA=1.5`, `CLEAN_CLAIM_PENALTY=0.35`, `R_MIN=0.45`,
+`kl_beta=0.02` to a true merged-v4 reference, full prompts. The run itself was the first healthy RL
+trajectory in the project: reward 0.33 → 0.64, completion truncations 46% → 5%, KL ≤ 0.0034, no
+collapse. Mid-eval recall peaked at checkpoint-150 and declined after (continued training bought
+restraint at the cost of catches); checkpoint-150 went to the full 632-record paired bootstrap as the
+single confirmatory test:
+
+- **recall:** parity with v4 (paired Δ −0.018, CI [−0.065, +0.026]) — the mid-eval's +0.073 regressed
+  exactly as a winner's-curse selection effect predicts.
+- **fp_rate on clean diffs: 0.749 → 0.658 (Δ −0.103, CI [−0.165, −0.043]) — the project's first
+  statistically significant RL improvement**, consistent across all five checkpoints and verified
+  qualitatively (tail compression, correct "no issues" verdicts where v4 fabricates).
+- **hallucination:** not significantly different. **Verdict: keep v4** per the pre-registered ship rule;
+  checkpoint-150 is preserved as a low-false-alarm variant. Footnotes: 4/632 outputs regress into
+  `<think>` repetition loops (production needs an unclosed-think extractor guard), and a label census
+  (25/373 tuples are style nits; the dominant "correctness" bucket includes reviewer-preference
+  comments) shows the recall metric is partly bounded by label quality, not capability.
 
 ---
 
 ## Why RL couldn't win here
+
+*(Revised after v5.2: the analysis below was originally written from the invalidated v5.0/v5.1 runs.
+The fixed-pipeline v5.2 run supports a sharper version of the same conclusion — RL moved the model to
+a strictly better point on the fp axis at recall parity, but did not move recall. And the recall
+ceiling is now known to have two components: model capability AND label quality — both models catch
+real defects that score zero because the reference thread discussed something else.)*
 
 v4 sits near its own **precision/recall frontier**. RL with a recall/precision-traded reward slides the model *along* that frontier — v5.0 toward quiet (recall ↓, halluc ↓), v5.1 toward loud (halluc ↑, recall flat) — but never pushes the frontier *outward*. To beat v4 on **both** axes you need a frontier shift, i.e. more capability, which RL on a frozen 7B with diff-only context doesn't provide. This matches the literature on small-model RL: it **restores latent capability but rarely exceeds the SFT teacher** [4], and RLVR's reasoning gains are bounded by the base model at large pass@k [5] — RL redistributes rather than expands capability. (High SFT scores are also a poor predictor of RL outcomes [6].)
 

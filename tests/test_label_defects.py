@@ -79,3 +79,21 @@ def test_extract_record_drops_pathless_comment():
 
     out = ld.extract_defects_for_record(rec, extract_fn=fake)
     assert out["defects"] == []
+
+def test_extract_record_counts_ungrounded_comments():
+    # one grounded non-defect + one ungrounded comment -> defects=[], n_ungrounded=1:
+    # the record is AMBIGUOUS, not verified-clean
+    rec = {"instance_id": "i1", "diff": DIFF, "reference_comments": [
+        {"path": "auth.py", "line": 11, "text": "why did you do this?"},
+        {"path": "not_in_diff.py", "line": 3, "text": "real bug elsewhere"}]}
+    out = ld.extract_defects_for_record(rec, extract_fn=lambda d, c: None)
+    assert out["defects"] == []
+    assert out["n_ungrounded"] == 1
+
+
+def test_extract_record_verified_clean_has_zero_ungrounded():
+    rec = {"instance_id": "i1", "diff": DIFF, "reference_comments": [
+        {"path": "auth.py", "line": 11, "text": "nice cleanup"}]}
+    out = ld.extract_defects_for_record(rec, extract_fn=lambda d, c: None)
+    assert out["defects"] == []
+    assert out["n_ungrounded"] == 0

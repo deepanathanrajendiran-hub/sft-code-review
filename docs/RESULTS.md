@@ -58,6 +58,13 @@ The standout number is **fp_rate ≈ 0.77**: v4 asserts a defect on roughly thre
 | v5.0 ckpt-75 (F1 reward) | **0.070** | 0.73 | 0.032 | recall **collapsed** — model went quiet |
 | v5.1 ckpt-75 (F-beta=2) | 0.080–0.103 *(noisy)* | 0.74–0.77 | 0.031 | **statistical tie** both axes |
 | v5.1 ckpt-150 (more training) | **0.080** | — | 0.031 | **worse** — see trajectory below |
+| **v5.2 ckpt-150 (fixed pipeline)** | 0.087–0.093 *(= v4, parity)* | **0.658** | 0.029 | **fp −10pp SIGNIFICANT; recall parity → keep v4 per ship rule** |
+
+> **Important caveat on v5.0/v5.1 (and Runs #1–#3):** a later code review found those runs were
+> invalidated by pipeline defects — TRL's default `max_prompt_length=512` silently left-truncated
+> ~87% of training prompts (the policy couldn't see the diffs it was scored on), and the KL term
+> anchored to the *base* model instead of v4 (PEFT `disable_adapter` reference). Their rows are kept
+> as a record, but they say nothing about RL-on-v4. v5.2 is the first run with a working pipeline.
 
 **No RL checkpoint beats v4 on both axes with statistical significance.** Paired-bootstrap CIs:
 
@@ -79,6 +86,59 @@ Deterministic local analysis (no API), confirming the model got **louder, not be
 | **repetition-loop pathology (records)** | 22 | 29 | 35 | ↑ **new regression** |
 
 ckpt-150 asserts *more* but its extra assertions skew toward fabrication/off-target nitpicks, not real catches — and a repetition-loop degeneration (a review emitting "Bug:" hundreds of times) appeared and worsened with training.
+
+### v5.2 — the fixed-pipeline run (2026-06-11)
+
+After repairing the five pipeline defects (prompt truncation, KL anchor, think-leak scoring,
+ambiguous-clean labels, mid-eval asymmetry), one pre-registered CoRPO run (RECALL_BETA=1.5,
+CLEAN_CLAIM_PENALTY=0.35, R_MIN=0.45, kl_beta=0.02 to a true merged-v4 reference) trained cleanly:
+reward 0.33 → 0.64, completion truncations 46% → 5%, KL ≤ 0.0034, no length collapse. Mid-eval recall
+peaked at checkpoint-150 and declined after (later training bought restraint at the cost of catches);
+checkpoint-150 was the single confirmatory test on the full 632-record paired bootstrap:
+
+| axis | v4 → v5.2 | paired delta (95% CI) | call |
+|---|---|---|---|
+| defect_recall | 0.087 → 0.093 (point) | −0.018 [−0.065, +0.026] | **parity** (not significant) |
+| fp_rate (clean) | 0.749 → 0.658 | **−0.103 [−0.165, −0.043]** | **significant improvement** |
+| hallucination | 0.036 → 0.029 | −0.007 [−0.023, +0.008] | not significant |
+
+**Verdict: keep v4 as production** (the pre-registered ship rule requires a significant recall gain) —
+but the false-positive reduction is real, consistent across all five checkpoints, and qualitatively
+verified (v5.2's reviews show tail compression — mean 898→516 chars with the median unchanged — and
+its "no issues" verdicts on clean diffs read as correct judgment where v4 fabricates). Checkpoint-150
+is preserved as a low-false-alarm variant (same recall, ~12% relatively fewer clean-diff false alarms).
+
+Two honest footnotes: (1) a mild repetition-loop regression — 4/632 outputs loop inside `<think>` at
+deployment settings (v4: 0/632), so production use needs an unclosed-think guard in the extractor;
+(2) a label census (373 tuples: 195 correctness, 114 bug, 29 api_contract, **25 style**, 9 perf,
+1 security) plus a disagreement read showed the recall metric is partly bounded by label quality —
+both models catch real defects that score zero because the human thread discussed something else, and
+some "clean" records carry plausible real issues both models independently flag. Recall ≈ 0.09
+measures thread-matching, not bug-finding; label-quality work is the cheapest path to a sharper metric.
+
+### Diff-only oracle ceiling (2026-06-11)
+
+To decide whether the recall plateau is the *task's* ceiling (diff-only context) or the *student's*,
+`oracle_ceiling.py` had DeepSeek V4-Pro (thinking enabled) review the same 632 diffs with the same
+prompt and 12000-char budget, scored by the same matcher on the same labels:
+
+| model | recall | precision | fp_rate (clean) | halluc |
+|---|---|---|---|---|
+| v4 | 0.095 | 0.093 | 0.744 | 0.036 |
+| v5.2 ckpt-150 | 0.115 | 0.118 | 0.650 | 0.029 |
+| **oracle (V4-Pro)** | **0.388** | 0.186 | 0.966 | 0.127 |
+
+*(style-filtered labels shift every number by ≤0.01 — style leakage was not the binding label problem)*
+
+Two conclusions. **First, the task has ~4× recall headroom at diff-only context** — the students are
+training/capability-limited, not context-limited, which makes recall-targeted distillation (the
+oracle is the teacher) the highest-leverage next step, with RL after. **Second, the clean labels are
+substantially incomplete:** even the frontier model "false-alarms" on 97% of label-clean records and
+only 19% of its claims match labels — so fp_rate/precision here measure agreement with one reviewer's
+thread, not error rates. v5.2's fp improvement stands as a behavioral restraint difference, but no
+absolute fp number from this harness should be quoted as a false-alarm rate. (Caveat: the oracle, the
+labeler, and the matcher are all V4-Pro — some same-family phrasing leniency may inflate the ceiling,
+but not plausibly by 4×.)
 
 ---
 

@@ -122,3 +122,18 @@ def test_reward_in_unit_interval(sample_diff):
         r = cr.verifiable_reward(sample_diff, _review(GROUNDED_BODY), defects,
                                  match_fn=_matcher(caught), count_fn=_claims(n))
         assert 0.0 <= r <= 1.0
+
+def test_truncated_think_scores_zero(sample_diff):
+    # max_completion_length can cut a rollout before </think>; the extractor's
+    # fallback would otherwise pass raw reasoning text through as the "review"
+    truncated = "<think>step 1: looking at the diff, the `user` handling"
+    assert cr.verifiable_reward(sample_diff, truncated, DEFECTS,
+                                match_fn=_matcher(set()), count_fn=_claims(0)) == 0.0
+
+
+def test_closed_think_not_treated_as_truncated(sample_diff):
+    # a normal rollout with a closed think block still scores via the review
+    r = cr.verifiable_reward(sample_diff, _review(GROUNDED_BODY), DEFECTS,
+                             match_fn=_matcher({d["canonical_desc"] for d in DEFECTS}),
+                             count_fn=_claims(2))
+    assert r > 0.9

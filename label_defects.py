@@ -62,17 +62,23 @@ def parse_extraction(raw: str) -> dict | None:
 
 
 def extract_defects_for_record(record: dict, extract_fn=None) -> dict:
-    """Return {instance_id, defects:[{path,line,issue_type,canonical_desc}, ...]} for one record.
+    """Return {instance_id, defects:[...], n_ungrounded} for one record.
 
     Grounding is checked before the classifier so ungrounded comments cost no API call.
-    An empty defects list means a clean diff (the model should find nothing).
+    An empty defects list with n_ungrounded == 0 means a clean diff (every comment was
+    classified non-defect — the model should find nothing). n_ungrounded counts comments
+    dropped because their path was missing or absent from the diff: a record with no
+    grounded defects but n_ungrounded > 0 is AMBIGUOUS (the diff may contain a defect we
+    couldn't ground) and must NOT be trained as clean — load_defect_labels skips those.
     """
     fn = extract_fn or _extract_fn
     paths = diff_paths(record.get("diff", ""))
     defects: list[dict] = []
+    n_ungrounded = 0
     for c in record.get("reference_comments", []):
         path = c.get("path")
         if not path or path not in paths:
+            n_ungrounded += 1
             continue  # uncatchable from the diff alone
         res = fn(record["diff"], c)
         if not res:
@@ -83,7 +89,7 @@ def extract_defects_for_record(record: dict, extract_fn=None) -> dict:
             "issue_type": res["issue_type"],
             "canonical_desc": res["canonical_desc"],
         })
-    return {"instance_id": record["instance_id"], "defects": defects}
+    return {"instance_id": record["instance_id"], "defects": defects, "n_ungrounded": n_ungrounded}
 
 
 def build_extraction_prompt(diff: str, comment: dict) -> str:
@@ -126,7 +132,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="JSONL with {instance_id, diff, reference_comments}")
-    ap.add_argument("--output", required=True, help="JSONL {instance_id, defects:[...]} per line")
+    ap.add_argument("--output", required=True, help="JSONL {instance_id, defects:[...], n_ungrounded} per line")
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
@@ -140,15 +146,18 @@ def main():
         labels = list(ex.map(extract_defects_for_record, rows))
 
     n_defects = sum(len(r["defects"]) for r in labels)
-    n_clean = sum(1 for r in labels if not r["defects"])
+    n_clean = sum(1 for r in labels if not r["defects"] and not r.get("n_ungrounded", 0))
+    n_ambiguous = sum(1 for r in labels if not r["defects"] and r.get("n_ungrounded", 0) > 0)
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w") as fh:
         for r in labels:
             fh.write(json.dumps(r) + "\n")
     print(
-        f"[label_defects] wrote {len(labels)} records, {n_defects} defect tuples, "
-        f"{n_clean} clean diffs -> {out}",
+        f"[label_defects] wrote {len(labels)} records: {n_defects} defect tuples, "
+        f"{n_clean} verified-clean diffs, {n_ambiguous} ambiguous "
+        f"(no grounded defects but ungrounded defect comments — excluded from training "
+        f"by load_defect_labels) -> {out}",
         file=sys.stderr,
     )
 

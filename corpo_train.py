@@ -9,8 +9,12 @@ Usage:
         --defect-labels cache/defect_labels.jsonl \\
         --output-dir /content/corpo-out
 
-    # Full training (~4-6h on Colab A100)
-    python corpo_train.py [same args as above without --variance-gate-only]
+    # Full training (~4-6h on Colab A100). --v4-merged is REQUIRED for training:
+    # the policy is merged-v4 + a fresh LoRA so the KL reference (adapters disabled)
+    # is actually v4, and prompts are never left-truncated (max_prompt_length=6144,
+    # not TRL's silent 512 default).
+    python corpo_train.py [same args as above without --variance-gate-only] \\
+        --v4-merged /content/sft-v4-merged-for-eval
 
     # Resume from checkpoint. Checkpoints are HF-named `checkpoint-<N>`. After a Colab
     # disconnect the local --output-dir is wiped; resume from the Drive mirror (the path
@@ -41,7 +45,13 @@ from corpo_reward import verifiable_reward
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--v4-adapter", required=True,
-                    help="Path to v4 LoRA adapter to continue training")
+                    help="Path to v4 LoRA adapter (used by the variance gate's vLLM LoRA hot-swap)")
+    ap.add_argument("--v4-merged", default=None,
+                    help="Path to the MERGED v4 model (e.g. sft-v4-merged-for-eval). Required for "
+                         "training: the policy is merged-v4 + a FRESH LoRA, so TRL's disable_adapter "
+                         "KL reference is actually v4. Loading the adapter directly would make the "
+                         "KL reference the BASE model (adapters disabled = base), pulling the policy "
+                         "away from v4 — the v5.0/v5.1 bug.")
     ap.add_argument("--v4-backup", required=True,
                     help="Path to v4 LoRA backup (training refuses to start without it)")
     ap.add_argument("--train-prompts", required=True,
@@ -59,8 +69,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--kl-beta",
         type=float,
         default=0.02,
-        help="KL coefficient to the v4 reference. v5 restores KL>0 (Run #3's beta=0 "
-             "removed the only anchor to v4 and caused capability/format drift). "
+        help="KL coefficient to the v4 reference. Only a true v4 anchor when the model is "
+             "loaded via --v4-merged + fresh LoRA (disable_adapter then yields merged v4). "
              "DeepSeek-Math used 0.04, R1 used 0.001; 0.02 is a mid anchor.",
     )
     ap.add_argument("--learning-rate", type=float, default=5e-6)
@@ -123,8 +133,42 @@ def _check_variance_gate(rewards: np.ndarray, threshold: float = 0.10) -> tuple[
     mean_std = float(per_group_std.mean())
     return mean_std >= threshold, mean_std
 
+def _make_lora_config_tolerant() -> None:
+    """Make peft.LoraConfig ignore kwargs it doesn't know.
+
+    The installed unsloth is newer than the pinned peft 0.17.1 and passes
+    LoraConfig kwargs that 0.17.1 rejects (e.g. ensure_weight_tying, added in
+    peft 0.18). peft 0.18+ can't be installed against the pinned transformers
+    4.56.2 (its tensor-parallel import needs 4.57+), so we tolerate instead of
+    upgrade. Dropping these is safe here: they only affect embedding/lm_head
+    tying or exotic LoRA variants, and we target attention+MLP modules only.
+    Idempotent; patches the class object, so unsloth's module-level
+    `from peft import LoraConfig` sees it too.
+    """
+    import inspect
+    import peft
+
+    if getattr(peft.LoraConfig, "_kwarg_shim_installed", False):
+        return
+    orig_init = peft.LoraConfig.__init__
+    valid = set(inspect.signature(orig_init).parameters) - {"self"}
+
+    def tolerant_init(self, *a, **kw):
+        dropped = sorted(k for k in kw if k not in valid)
+        if dropped:
+            print(
+                f"[corpo_train] LoraConfig: dropping kwargs unsupported by "
+                f"peft {peft.__version__}: {dropped}",
+                file=sys.stderr,
+            )
+        orig_init(self, *a, **{k: v for k, v in kw.items() if k in valid})
+
+    peft.LoraConfig.__init__ = tolerant_init
+    peft.LoraConfig._kwarg_shim_installed = True
+
+
 def run_training(args: argparse.Namespace) -> None:
-    """Load the v4 adapter, build the CoRPO trainer, and train.
+    """Load merged-v4 + a fresh LoRA, build the CoRPO trainer, and train.
 
     Heavy deps (torch, transformers, peft, trl, datasets) are lazy-imported here so the
     unit tests for parse_args / verify_v4_backup / _check_variance_gate don't need them.
@@ -138,9 +182,27 @@ def run_training(args: argparse.Namespace) -> None:
 
     from corpo_trainer import CoRPOTrainer
 
+    if not args.v4_merged:
+        raise SystemExit(
+            "[corpo_train] --v4-merged is required for training. Loading the adapter "
+            "directly makes TRL's disable_adapter KL reference the BASE model, not v4 "
+            "(the v5.0/v5.1 bug). Pass the merged v4 dir (e.g. sft-v4-merged-for-eval)."
+        )
+
     with open(args.train_prompts) as fh:
         prompts = [json.loads(line) for line in fh if line.strip()]
     defect_labels = load_defect_labels(args.defect_labels)
+    # Records absent from the labels (ambiguous: a comment failed grounding and no
+    # grounded defect survived) must NOT train — build_reward_fn would default them
+    # to [] and the clean-restraint penalty would punish flagging real defects.
+    pre_label_filter = len(prompts)
+    prompts = [p for p in prompts if p["instance_id"] in defect_labels]
+    if pre_label_filter - len(prompts):
+        print(
+            f"[corpo_train] dropped {pre_label_filter - len(prompts)}/{pre_label_filter} "
+            f"prompts with ambiguous/missing defect labels",
+            file=sys.stderr,
+        )
     n_labeled = sum(1 for v in defect_labels.values() if v)
     print(
         f"[corpo_train] loaded {len(prompts)} prompts + defect labels for "
@@ -149,21 +211,34 @@ def run_training(args: argparse.Namespace) -> None:
         file=sys.stderr,
     )
 
-    # fast_inference=True attaches a vllm_engine to the model, which Unsloth's patched
-    # GRPOTrainer reads (self.llm = model.vllm_engine) instead of TRL's vLLM colocation.
-    # Passing the v4 adapter as model_name lets Unsloth auto-detect the base from its
-    # adapter_config.json and load both at once, already trainable.
+    # Policy = merged v4 weights + a FRESH LoRA. With a PEFT model TRL computes the KL
+    # reference by disabling adapters, so the reference is the underlying weights: here
+    # that's merged v4 (correct anchor). Loading base+v4-adapter instead would anchor
+    # to BASE — the bug that dragged v5.0/v5.1 toward base behavior.
+    # fast_inference=True attaches a vllm_engine that Unsloth's patched GRPOTrainer uses.
     print(
-        f"[corpo_train] loading v4 adapter ({args.v4_adapter}) via FastLanguageModel",
+        f"[corpo_train] loading merged v4 ({args.v4_merged}) + fresh LoRA via FastLanguageModel",
         file=sys.stderr,
     )
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=args.v4_adapter,
+        model_name=args.v4_merged,
         max_seq_length=8192,
         load_in_4bit=False,
         fast_inference=True,
         max_lora_rank=32,
         gpu_memory_utilization=0.9,
+    )
+    _make_lora_config_tolerant()
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=32,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        lora_alpha=64,
+        lora_dropout=0,  # TRL disables dropout for GRPO anyway
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=42,
     )
 
     # Chat template must match run_ood_eval's format.
@@ -221,6 +296,11 @@ def run_training(args: argparse.Namespace) -> None:
         adam_beta2=0.95,
         beta=args.kl_beta,
         num_generations=args.num_generations,
+        # TRL's DEFAULT max_prompt_length is 512 and it LEFT-truncates every prompt to
+        # the last 512 tokens — which silently cut the system message and most of the
+        # diff in every pre-v5.2 run. 6144 covers the 6000-token prompt filter above;
+        # 6144 + 2048 completion = 8192 = max_seq_length.
+        max_prompt_length=6144,
         max_completion_length=args.max_new_tokens,
         # TRL needs per_device_train_batch_size % num_generations == 0 (the device
         # micro-batch holds one prompt's G completions), so pdtbs = num_generations and
@@ -238,6 +318,11 @@ def run_training(args: argparse.Namespace) -> None:
         bf16=True,
         loss_type="dr_grpo",  # length-bias mitigation (arXiv:2503.20783)
         scale_rewards="none",  # CoRPOTrainer requires this
+    )
+    print(
+        f"[corpo_train] prompt regime: max_prompt_length={grpo_config.max_prompt_length} "
+        f"(prompts pre-filtered to <=6000 tokens; nothing gets left-truncated)",
+        file=sys.stderr,
     )
 
     trainer = CoRPOTrainer(
@@ -313,6 +398,17 @@ def main():
         )
     print("[corpo_train] pre-flight: TRL exposes loss_type ✓", file=sys.stderr)
 
+    # Pre-flight: TRL's GRPOConfig.max_prompt_length DEFAULTS to 512 and left-truncates
+    # every prompt. run_training sets it to 6144 explicitly; this check exists so the
+    # invariant is loud if the config construction ever changes.
+    if "max_prompt_length" not in _trl_params:
+        raise RuntimeError(
+            "TRL GRPOConfig does not expose max_prompt_length — cannot guarantee "
+            "prompts won't be silently truncated to TRL's internal default. Abort."
+        )
+    print("[corpo_train] pre-flight: max_prompt_length is configurable (set to 6144 in training) ✓",
+          file=sys.stderr)
+
     # run_training sets pdtbs = num_generations so the divisibility constraint holds
     # structurally; just echo the resulting batch shape.
     print(
@@ -324,6 +420,12 @@ def main():
     if args.variance_gate_only:
         passed = run_variance_gate(args)
         sys.exit(0 if passed else 1)
+
+    if not args.v4_merged:
+        raise SystemExit(
+            "[corpo_train] --v4-merged is required for training (KL must anchor to "
+            "merged v4, not base). Pass e.g. /content/sft-v4-merged-for-eval."
+        )
     run_training(args)
 
 def _generate_v4_rollouts(
@@ -399,17 +501,27 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
     Scores the rollouts with verifiable_reward and inspects the within-group reward std
     as a signal-strength check. Also prints a histogram and percentile-based R_min
     candidates so the operator can pick a calibrated --r-min-correct for the real run.
+    Samples only prompts with unambiguous defect labels (same filter as training) so the
+    gate measures the same prompt population training will see.
     Returns True if mean within-group std >= 0.10; writes the verdict to stderr either way.
     """
     import json
     import random
 
+    defect_labels = load_defect_labels(args.defect_labels)
+
     with open(args.train_prompts) as fh:
         all_prompts = [json.loads(line) for line in fh if line.strip()]
+    pre_filter = len(all_prompts)
+    all_prompts = [p for p in all_prompts if p["instance_id"] in defect_labels]
+    if pre_filter - len(all_prompts):
+        print(
+            f"[variance-gate] dropped {pre_filter - len(all_prompts)}/{pre_filter} prompts "
+            f"with ambiguous/missing defect labels (matches training filter)",
+            file=sys.stderr,
+        )
     rng = random.Random(42)
     sample = rng.sample(all_prompts, min(50, len(all_prompts)))
-
-    defect_labels = load_defect_labels(args.defect_labels)
 
     print(f"[variance-gate] generating {len(sample)} x {args.num_generations} v4 rollouts", file=sys.stderr)
     rollouts_by_prompt = _generate_v4_rollouts(
@@ -443,10 +555,32 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
     for h, e in zip(hist, edges[:-1]):
         print(f"  [{e:.1f}, {e+0.1:.1f}): {'#' * min(h, 60)}  ({h})", file=sys.stderr)
 
+    # Diagnose the zero-reward mass: hard 0s are format failures (truncated <think>
+    # or empty extraction), not "low quality". They are excluded from the R_min
+    # percentiles below — a >33% point mass at 0 made pooled p33 = 0.000, and
+    # R_min=0 never clamps a non-negative reward (CoRPO degenerates to plain GRPO).
+    flat = rewards.ravel()
+    zero_mask = flat < 1e-9
+    n_zero = int(zero_mask.sum())
+    if n_zero:
+        n_trunc = sum(
+            1
+            for prompt_rollouts in rollouts_by_prompt
+            for r in prompt_rollouts
+            if "<think>" in r and "</think>" not in r
+        )
+        print(
+            f"[variance-gate] zero-reward rollouts: {n_zero}/{len(flat)} "
+            f"(unclosed <think> i.e. truncated at max-new-tokens: {n_trunc}; "
+            f"empty/other extraction failures: {max(0, n_zero - n_trunc)})",
+            file=sys.stderr,
+        )
+    nonzero = flat[~zero_mask]
+
     # The CoRPO paper sets R_min at the correctness boundary (below the median of correct
     # rollouts, above the max of incorrect). For continuous [0,1] rewards we read it off
-    # the rollout distribution rather than picking an aspirational target; p33 by default.
-    p25, p33, p40, p50 = np.percentile(rewards.ravel(), [25, 33, 40, 50])
+    # the NONZERO rollout distribution (format failures aren't "incorrect reviews",
+    # they're degenerate outputs); p33 by default.
     if not passed:
         print(
             "[variance-gate] WARNING: gate FAILED — rollout distribution is too narrow. "
@@ -454,7 +588,17 @@ def run_variance_gate(args: argparse.Namespace) -> bool:
             "Investigate the reward function or base-sample cache before training.",
             file=sys.stderr,
         )
-    print(f"[variance-gate] R_min candidates (pick from rollout distribution):", file=sys.stderr)
+    if len(nonzero) == 0:
+        print(
+            "[variance-gate] every rollout scored 0 — no R_min candidates. "
+            "Fix the reward/extraction before training.",
+            file=sys.stderr,
+        )
+        print(f"[variance-gate] verdict: FAIL", file=sys.stderr)
+        return False
+    p25, p33, p40, p50 = np.percentile(nonzero, [25, 33, 40, 50])
+    print(f"[variance-gate] R_min candidates (percentiles of NONZERO rewards, n={len(nonzero)}):",
+          file=sys.stderr)
     print(f"  p25={p25:.3f}   p33={p33:.3f}   p40={p40:.3f}   p50={p50:.3f}", file=sys.stderr)
     if passed:
         print(f"  -> recommended default: p33 = {p33:.3f}", file=sys.stderr)
@@ -469,17 +613,33 @@ def load_defect_labels(path) -> dict[str, list[dict]]:
     """Load clean defect tuples keyed by instance_id (built by label_defects.py).
 
     One JSON object per line; an empty "defects" list marks a clean diff (the model
-    should find nothing).
+    should find nothing). Records with no grounded defects but >=1 comment dropped
+    for grounding (n_ungrounded > 0) are AMBIGUOUS — the diff may contain a real
+    defect we just couldn't ground — so they're skipped here; callers must drop
+    prompts whose instance_id is absent (treating them as clean would punish the
+    model for flagging real issues). Older label files without n_ungrounded load
+    unchanged.
     """
     import json
     labels: dict[str, list[dict]] = {}
+    skipped_ambiguous = 0
     with Path(path).open() as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             row = json.loads(line)
-            labels[row["instance_id"]] = row.get("defects", [])
+            defects = row.get("defects", [])
+            if not defects and row.get("n_ungrounded", 0) > 0:
+                skipped_ambiguous += 1
+                continue
+            labels[row["instance_id"]] = defects
+    if skipped_ambiguous:
+        print(
+            f"[corpo_train] skipped {skipped_ambiguous} ambiguous label records "
+            f"(no grounded defects but ungrounded defect comments exist)",
+            file=sys.stderr,
+        )
     return labels
 
 

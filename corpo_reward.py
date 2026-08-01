@@ -211,6 +211,12 @@ def verifiable_components(
 
 
 def verifiable_reward(diff: str, rollout: str, defects: list[dict], match_fn=None, count_fn=None) -> float:
+    # A rollout that opens <think> but never closes it was truncated by
+    # max_completion_length. _extract_review's fallback would pass the raw
+    # reasoning text through as the "review" and score garbage; treat truncation
+    # as a hard failure (0.0) so the policy learns to finish within budget.
+    if "<think>" in rollout and "</think>" not in rollout:
+        return 0.0
     review = _extract_review(rollout)
     # _extract_review's fallback yields the literal "<review></review>" for an
     # empty block — strip the tags so that lands as no review (score 0)
