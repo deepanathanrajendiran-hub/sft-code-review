@@ -1,6 +1,8 @@
 # Results
 
-All numbers are from the evaluation pipelines in this repo. Two distinct eval regimes:
+All numbers are from the evaluation pipelines in this repo. **Every metric below is defined against its implementing code in [`METRICS.md`](METRICS.md)** — read that before quoting a number, because three metrics do not mean what their names suggest and "hallucination" refers to two different measures.
+
+Two distinct eval regimes:
 
 1. **In-distribution, judge-based** — 200 samples drawn from the training distribution (transformers / sklearn / pydantic / fastapi), scored by a 3-vote Claude Haiku judge. This is the headline benchmark v4 was shipped on.
 2. **Out-of-distribution, judge-independent** — 632 records from ~90 unseen repos, scored by recall against clean defect tuples + a backtick-grounding hallucination metric, with **no LLM quality judge**. Built for the v5 RL experiments to remove the judge as a single point of failure.
@@ -16,7 +18,7 @@ All numbers are from the evaluation pipelines in this repo. Two distinct eval re
 | Pass@1 ≥ 7 | 7% | 14.5% | **46.0%** |
 | Pass@1 ≥ 8 (strict) | 2% | — | **24.5%** |
 | Hallucination rate | 14.5% | 34.5% *(3× worse)* | **7.0%** *(halved vs base)* |
-| Diff-identifier mention rate *(labelled "issue detection" in the notebook — it is **not** a defect-detection metric; see §2)* | 96.5% | 94.5% | 92.0% |
+| Diff-identifier mention rate *(labelled "issue detection" in the notebook — **not** a defect-detection metric; [why](METRICS.md#diff-identifier-mention-rate--965--920))* | 96.5% | 94.5% | 92.0% |
 | ROUGE-L vs expert reference | 0.099 | — | **0.180** |
 | Failure-pattern tests (9 patterns × 3) | 27/27 | 27/27 | 27/27 *(non-discriminating — see below)* |
 | **No-issue probe** (20 clean diffs, invents a bug) | **0/20** | — | **3/20** *(v4 is worse)* |
@@ -44,7 +46,7 @@ Clean, no overfitting: train loss 1.6 → 0.84, val loss 1.03 → 0.88, train–
 
 ## 2. Out-of-distribution, 632-record, judge-independent
 
-Metrics (all from `score_v5.py`):
+Metrics (all from `score_v5.py`; full definitions in [`METRICS.md`](METRICS.md)):
 
 - **`defect_recall`** — fraction of known defects caught, on the 299 records that have a labeled defect (semantic matcher).
 - **`precision`** — caught / claims on those records.

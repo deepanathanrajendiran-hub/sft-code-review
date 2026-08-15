@@ -66,6 +66,8 @@ Single-stage SFT, no preference optimization. (DPO was tried twice — v4, v5-DP
 
 ## Evaluation methodology
 
+> Metric definitions, with the code that computes each one: [`METRICS.md`](METRICS.md).
+
 ### In-distribution (judge-based)
 
 `eval/eval.ipynb` — vLLM generation for base + SFT, then: 3-vote Haiku pairwise with bootstrap CI, absolute Haiku scoring, ROUGE/BLEU vs reference, a no-issue probe, a 9-pattern × 3 failure-mode suite, a prompt-engineering gauntlet (v4 vs few-shot CoT on the same base), and a per-repo breakdown. Empty-review-bug and single-vote issues from the v3 era were patched here.

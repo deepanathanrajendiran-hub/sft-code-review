@@ -5,7 +5,7 @@ A fine-tune of `Qwen2.5-Coder-7B-Instruct` that reads a diff and writes a senior
 It's also an honest experiment log. The SFT model works: it beats the base model 86% head-to-head in-distribution, 79% out-of-distribution, and halves the hallucination rate. Four rounds of RL followed. A later pipeline audit invalidated the first three — they had been training on left-truncated prompts. The one clean run reached recall parity with a *statistically significant* cut in false flagging on clean diffs: not enough to displace v4 under the pre-registered ship rule, but the project's first real RL gain. The judge-free harness that settled it is the more reusable artifact. The wins, the invalidated runs, and the corrections are all written up here.
 
 - **Production model:** `code-reviewer-lora-v4-traces` (LoRA adapter, ~300 MB — weights aren't in git)
-- **Metrics:** [`docs/RESULTS.md`](docs/RESULTS.md)
+- **Metrics:** [`docs/RESULTS.md`](docs/RESULTS.md) — and [`docs/METRICS.md`](docs/METRICS.md) for what each number actually measures
 - **Methodology, the RL saga, lessons, references:** [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md)
 
 ---
@@ -143,6 +143,7 @@ After v4 shipped, the obvious next move was to push recall up and false flagging
 README.md
 docs/
   RESULTS.md          metrics: in-distribution + OOD (no quality judge)
+  METRICS.md          what every metric measures, defined against its code
   EXPERIMENTS.md      methodology, the RL saga, lessons, references
 
 # data pipeline
