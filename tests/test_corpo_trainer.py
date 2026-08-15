@@ -18,7 +18,10 @@ import types
 from unittest.mock import patch
 
 import pytest
-import torch
+
+# torch is a heavy optional dep; without this guard a bare import here aborts
+# collection for the WHOLE suite on a fresh clone, not just this module.
+torch = pytest.importorskip("torch")
 
 # --- Stub `trl` so `corpo_trainer` is importable without TRL installed. ---
 if "trl" not in sys.modules:

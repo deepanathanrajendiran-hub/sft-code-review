@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PYTHON = str(REPO_ROOT / ".venv" / "bin" / "python")
+# Use the interpreter running the tests, not a hardcoded venv path — the latter
+# only resolves on the author's machine.
+PYTHON = sys.executable
 
 
 def test_variance_gate_only_aborts_on_missing_backup(tmp_path):

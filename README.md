@@ -2,7 +2,7 @@
 
 A fine-tune of `Qwen2.5-Coder-7B-Instruct` that reads a diff and writes a senior-engineer-style review. The shipped model is a LoRA adapter trained with **reasoning-trace SFT** — each training target is a `<think>` block followed by a `<review>` block, distilled from DeepSeek V4-Pro.
 
-It's also an honest experiment log. The SFT model works: it beats the base model 86% head-to-head and halves the hallucination rate. Three rounds of RL on top of it (GRPO, then CoRPO with a verifiable reward) did **not** beat it — and the judge-independent harness built to prove that is, in the end, the more reusable artifact. Both the win and the negative result are written up here.
+It's also an honest experiment log. The SFT model works: it beats the base model 86% head-to-head in-distribution, 79% out-of-distribution, and halves the hallucination rate. Four rounds of RL followed. A later pipeline audit invalidated the first three — they had been training on left-truncated prompts. The one clean run reached recall parity with a *statistically significant* cut in false flagging on clean diffs: not enough to displace v4 under the pre-registered ship rule, but the project's first real RL gain. The judge-free harness that settled it is the more reusable artifact. The wins, the invalidated runs, and the corrections are all written up here.
 
 - **Production model:** `code-reviewer-lora-v4-traces` (LoRA adapter, ~300 MB — weights aren't in git)
 - **Metrics:** [`docs/RESULTS.md`](docs/RESULTS.md)
@@ -22,9 +22,11 @@ SFT v4 vs. the base model, 200-sample in-distribution eval, 3-vote Claude Haiku 
 | Hallucination rate | 14.5% | **7.0%** |
 | ROUGE-L vs expert reference | 0.099 | **0.180** |
 
+Every figure above is reproduced in [`eval/eval.ipynb`](eval/eval.ipynb)'s stored outputs. And it holds up off-distribution — on 632 records from 88 unseen repos, v4 wins **79.0%** of pairwise comparisons (499–121–12, 95% CI [75.8%, 82.1%]).
+
 A few-shot chain-of-thought prompt on the same base model — the "do you even need to fine-tune?" challenger — wins only **13.5%** head-to-head against v4. At this scale the fine-tuning is doing real work.
 
-RL did not improve on this; see [The RL negative result](#the-rl-negative-result).
+RL reached recall parity with a significant false-alarm reduction; v4 still ships. See [The RL arc](#the-rl-arc-three-invalidated-rounds-then-one-clean-run).
 
 ---
 
@@ -71,7 +73,7 @@ The load-bearing design choice. Asking the teacher for `<think>`+`<review>` with
 - **Call 2** sees diff + draft + reference → a reconciliation label (AGREE / REFERENCE_BETTER / DRAFT_BETTER / BOTH_VALID) + final review.
 - **The SFT target** is Call 1's `<think>` plus Call 2's `<review>`. The reconciliation block is kept per-record for audit but never trained on — the student has no reference at inference.
 
-Four grounding filters (`passes_filters`) reject ungrounded traces: the review must name a diff identifier (F1); every backticked identifier in the review must appear in the diff or reference (F2); length sanity (F3); schema (F4). A ~150-entry stopword list — shared with the eval — keeps language keywords and well-known library symbols from counting as hallucinations.
+Four grounding filters (`passes_filters`) reject ungrounded traces: the review must name a diff identifier (F1); every backticked identifier in the review must appear in the diff or reference (F2); length sanity (F3); schema (F4). A 278-term stopword list — byte-identical between the generator's F2 filter and the eval's hallucination metric — keeps language keywords and well-known library symbols from counting as hallucinations.
 
 ```bash
 export DEEPSEEK_API_KEY=sk-...
@@ -89,12 +91,12 @@ Open `sft.ipynb` and run it top to bottom: LoRA r=32, α=64, lr=1e-4, 2 epochs, 
 ### 3. Evaluate
 
 - **In-distribution, judge-based:** `eval/eval.ipynb` — 3-vote Haiku pairwise + bootstrap CI, a no-issue probe, a 9×3 failure-pattern suite, a prompt-engineering gauntlet, and a per-repo breakdown.
-- **Out-of-distribution, judge-independent:** the harness below — recall against clean defect tuples + a hallucination metric, with no LLM quality judge in the loop.
+- **Out-of-distribution, no quality judge:** the harness below — recall against grounded defect tuples + a hallucination metric, with no LLM *preference* judge anywhere in the metric. (A constrained LLM still does the defect labelling and the "was this caught?" matching; what's removed is the "which review is better" judge.)
 
 ```bash
 # 1) clean defect labels from the eval set (needs DEEPSEEK_API_KEY)
 python label_defects.py --input ood_preds_v4.jsonl --output cache/defect_labels.jsonl
-# 2) score predictions, judge-independent
+# 2) score predictions (no quality judge)
 python score_v5.py --preds ood_preds_v4.jsonl --labels cache/defect_labels.jsonl --pred-fields v4_pred
 # 3) compare two models with a PAIRED bootstrap, not two noisy means (see docs/EXPERIMENTS.md)
 python compare_recall.py --preds-a ood_preds_v4.jsonl --field-a v4_pred \
@@ -104,25 +106,34 @@ python compare_recall.py --preds-a ood_preds_v4.jsonl --field-a v4_pred \
 ### Tests
 
 ```bash
-python -m pytest -q          # 191 passed, 1 skipped
+pip install pytest numpy openai
+python -m pytest -q     # 193 passed, 2 skipped   (no GPU deps)
+                        # 201 passed, 1 skipped   (with torch + trl installed)
 ```
 
 ---
 
-## The RL negative result
+## The RL arc: three invalidated rounds, then one clean run
 
-After v4 shipped, the obvious next move was to push recall up and hallucination down with RL. It didn't work, and *how* it failed is the interesting part:
+After v4 shipped, the obvious next move was to push recall up and false flagging down with RL. Three rounds said no — and then a code review of the *pipeline* (not the results) found five defects meaning those three rounds had measured nothing at all.
 
-| Attempt | Reward | Outcome vs v4 (632-record judge-independent OOD) |
-|---|---|---|
-| GRPO runs #1–#3 | pairwise LLM judge | regressed (−22pp, −52pp, −6pp); the judge was gameable |
-| v5.0 (CoRPO) | `0.6·recall + 0.3·grounding + 0.1·length`, F1 | recall **collapsed** 0.094 → 0.070 — the model went quiet |
-| v5.1 ckpt-75 | same, F-beta=2 (recall-favoring) | **statistical tie** on both axes; over-flagging on disagreements |
-| v5.1 ckpt-150 | same, more training | **worse**: recall down, over-flagging up, a repetition-loop pathology emerged |
+| Attempt | Reward | Outcome vs v4 (632-record OOD) | status |
+|---|---|---|---|
+| GRPO runs #1–#3 | pairwise LLM judge | regressed (−22pp, −52pp, −6pp); the judge was gameable | **invalidated** |
+| v5.0 | verifiable reward, F1 | recall **collapsed** 0.094 → 0.070 — the model went quiet | **invalidated** |
+| v5.1 ckpt-75 | same, F-beta=2 (recall-favoring) | statistical tie on both axes; over-flagging on disagreements | **invalidated** |
+| v5.1 ckpt-150 | same, more training | worse: recall down, over-flagging up, repetition-loop pathology | **invalidated** |
+| **v5.2 ckpt-150** | same, `RECALL_BETA=1.5`, true v4 KL anchor, full prompts | recall **parity** (paired Δ −0.018, CI [−0.065, +0.026]); **clean-diff flag rate 0.749 → 0.658, CI [−0.165, −0.043] — significant** | **valid** |
 
-**Why.** v4 already sits near its precision/recall frontier. An RL reward that trades recall against precision slides the model *along* that frontier — v5.0 toward quiet, v5.1 toward loud — without pushing it outward. Beating v4 on **both** axes needs a frontier shift, i.e. more capability, which RL on a frozen 7B with diff-only context doesn't supply. This matches the literature: small-model RL restores latent capability but rarely exceeds the SFT teacher (citations in [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md#references)).
+**The five defects.** TRL's `GRPOConfig` defaults `max_prompt_length` to 512 and *left*-truncates: ~87% of training prompts lost the system message and most of the diff, so the policy was scored on defects it could not see. The KL term meant to anchor the policy to v4 was computed by PEFT with adapters disabled — i.e. it anchored to *base*, actively pulling the policy away from v4. Truncated `<think>` blocks fell through the extractor and were scored as reviews. Records whose defect comments failed diff-grounding were trained as "find nothing" on diffs containing real defects. And mid-training eval gave checkpoints 5000-char diffs against the v4 baseline's 12000-char budget. Two of the five are now structurally unrepeatable: `corpo_train.py` hard-exits without an explicitly merged reference model, and asserts at pre-flight that TRL still exposes the truncation knob.
 
-**Root cause of the over-flagging — it's in the data, not the RL.** Only **8.3%** of v4's 12,876 SFT targets are clean "no-issue" verdicts; **51%** assert a defect. Human PR reviews are *about* problems, so the distilled traces inherited the skew and the model learned to almost always find something — flagging a defect on **77%** of genuinely clean diffs. RL can't fix that. The planned remedy is v4.1: rebalance the SFT data toward restraint, single-stage SFT, no RL. See [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md#v41-the-data-fix).
+**What the one clean run shows.** v5.2 trained healthily — reward 0.33 → 0.64, completion truncations 46% → 5%, KL ≤ 0.0034, no length collapse, 372 steps. On the single pre-registered confirmatory test it cut clean-diff flagging significantly at recall parity, and the restraint is real rather than an artifact: review-length tail compression (mean 898 → 516 chars, median unchanged), identifiers per review 6.0 → 3.2, and correct "no issues" verdicts on diffs where v4 fabricates. **v4 still ships**, because the pre-registered ship rule required a significant *recall* gain and the n=50 mid-eval's promising +0.073 regressed to exact parity at n=632 — textbook winner's curse, which is why the protocol existed.
+
+**Why recall didn't move.** Not because the model had no room — the [oracle ceiling](docs/RESULTS.md) measures ~4× headroom on the same diff-only prompts. The reward's quality term is `F₁.₅(recall, precision)`, which is *identically zero* whenever a rollout catches nothing. So on the ~90% of labeled diffs the student cannot yet solve, all 8 rollouts in a group score the same on the axis that mattered, and the only live contrast came from the grounding and length terms — while clean-record restraint (53% of training prompts) was densely and cheaply rewarded. The gradient wasn't absent; it was dense on one axis and degenerate on the other, which predicts the observed result exactly. (Leading hypothesis, not a measurement — per-component reward variance was never logged. That's the first instrument to add.)
+
+**The over-flagging is mostly a data problem.** Only **8.3%** of the 12,876-record v3 corpus the v4 traces were distilled from carries a clean "no-issue" verdict; **51%** assert a defect. Human PR reviews are *about* problems, so the traces inherited the skew and the model learned to almost always find something. But note the earlier claim that "RL can't fix that" was wrong — v5.2 cut clean-diff flagging significantly. Data is the bigger lever, not the only one. See [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md#v41-the-data-fix).
+
+> **Note on the algorithm actually run.** The trainer implements the CoRPO clipped baseline `max(R_min, group_mean)`, but the executed v5.2 run auto-selected `R_MIN = 0.0` from the variance gate's p33. Because the reward is non-negative by construction, that clamp is an identity operation — so the shipped run is **Dr. GRPO with a group-mean baseline**, in a CoRPO-capable trainer. Recorded here rather than quietly relabelled.
 
 ---
 
@@ -131,7 +142,7 @@ After v4 shipped, the obvious next move was to push recall up and hallucination 
 ```
 README.md
 docs/
-  RESULTS.md          metrics: in-distribution + judge-independent OOD
+  RESULTS.md          metrics: in-distribution + OOD (no quality judge)
   EXPERIMENTS.md      methodology, the RL saga, lessons, references
 
 # data pipeline
@@ -144,15 +155,16 @@ sft.ipynb                   v4 SFT (LoRA, Unsloth)
 
 # evaluation — judge-based
 eval/eval.ipynb             in-distribution: 3-vote pairwise, failure patterns, prompt-eng gauntlet
-eval/eval_results.json
+eval/eval_results.json      NOTE: v3-era dump; the v4 numbers live in eval.ipynb's stored outputs
 
-# evaluation — judge-independent (the reusable harness)
+# evaluation — no quality judge (the reusable harness)
 run_ood_eval.py             OOD prediction generator + _extract_review
-ood_metrics.py              recall / hit-rate / hallucination metrics
+ood_metrics.py              hit-rate / hallucination metrics + the OOD pairwise judge (judged, not judge-free)
 label_defects.py            PR thread → clean grounded defect tuples
 defect_match.py             semantic "was this defect caught?" matcher
 score_v5.py                 recall / precision / fp-rate / hallucination
 compare_recall.py           paired-bootstrap significance (v5 vs v4)
+oracle_ceiling.py           frontier-teacher recall ceiling on the same prompts (the 0.388 result)
 mid_eval.py                 checkpoint eval during training
 eval/ood_eval.ipynb
 eval/ood_eval_results_v4.json
@@ -161,14 +173,14 @@ eval/ood_eval_results_v4.json
 corpo_reward.py             verifiable reward (recall + grounding + length)
 corpo_train.py              CoRPO driver + pre-flight variance gate
 corpo_trainer.py
-corpo_decision_gate.py
+corpo_decision_gate.py      superseded Run-#3 judge gate; v5.2 shipped on compare_recall.py
 corpo_train.ipynb           Colab driver
 
 # SWE-CARE loading / splits
 swecare_loader.py
 swecare_split.py
 
-tests/                      191 passing
+tests/                      201 passing (193 without torch/trl)
 ```
 
 Datasets and prediction dumps (`*.jsonl`) and model weights (`*.zip`, merged checkpoints) are **not** committed — they're large and regenerable. They're gitignored and live locally. `train_dataset_clean.jsonl` (the 12,488 human PR reviews) is the immutable ground truth the pipeline starts from.
@@ -181,4 +193,4 @@ Datasets and prediction dumps (`*.jsonl`) and model weights (`*.zip`, merged che
 - ⚠️ **v4's known failure mode: it over-flags clean code.** It invents a bug on 3/20 hand-built clean diffs where base invents none, and flags something on ~75% of label-clean OOD diffs (base: ~69%). This is the v4.1 target. (An earlier revision of this README claimed base scored 9/27 on the failure-pattern suite — that was wrong; base scores 27/27 and the suite does not discriminate between models.)
 - ⚠️ **RL: v4 still ships, but not because RL failed.** Three rounds were invalidated by pipeline bugs (see below); the one clean run (v5.2) reached recall parity with a *statistically significant* cut in clean-diff false flagging (0.749 → 0.658, paired CI [−0.165, −0.043]). `checkpoint-150` is kept as a low-false-alarm variant — it needs an unclosed-`<think>` guard in the extractor before deployment (4/632 outputs loop).
 - 🔜 **v4.1 data rebalance** — add clean-diff / no-issue traces (target ~30% clean, up from 8%) to cut the 77% false-positive rate. Single-stage SFT, no RL. High-confidence on hallucination; recall is capability-limited.
-- 🔜 **OOD breadth** — the 86% headline is in-distribution (transformers / sklearn / pydantic / fastapi). The 632-record OOD set is judge-independent, but recall there is ~0.09 for every model, reflecting the 7B's ceiling on diff-only review.
+- 🔜 **Recall is the open problem** — ~0.09 for every *student* model on the OOD set, but a frontier teacher scores **0.388** on the same diff-only prompts (`oracle_ceiling.py`). The gap is training, not context, so oracle trace distillation is the next lever — and the labels need enriching first (even the teacher "false-alarms" on 97% of label-clean records, so that metric measures thread-agreement, not correctness).

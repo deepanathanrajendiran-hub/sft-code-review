@@ -16,7 +16,7 @@ All numbers are from the evaluation pipelines in this repo. Two distinct eval re
 | Pass@1 ≥ 7 | 7% | 14.5% | **46.0%** |
 | Pass@1 ≥ 8 (strict) | 2% | — | **24.5%** |
 | Hallucination rate | 14.5% | 34.5% *(3× worse)* | **7.0%** *(halved vs base)* |
-| Issue detection | 96.5% | 94.5% | 92.0% |
+| Diff-identifier mention rate *(labelled "issue detection" in the notebook — it is **not** a defect-detection metric; see §2)* | 96.5% | 94.5% | 92.0% |
 | ROUGE-L vs expert reference | 0.099 | — | **0.180** |
 | Failure-pattern tests (9 patterns × 3) | 27/27 | 27/27 | 27/27 *(non-discriminating — see below)* |
 | **No-issue probe** (20 clean diffs, invents a bug) | **0/20** | — | **3/20** *(v4 is worse)* |
@@ -51,13 +51,26 @@ Metrics (all from `score_v5.py`):
 - **`fp_rate`** — fraction of *clean* records where the model asserted a defect (false-positive / over-flagging rate).
 - **`halluc`** — backtick-grounding hallucination (fraction of backticked identifiers absent from the diff and not in the stopword allow-list).
 
-### v4 baseline (production model)
+### v4 vs. the base model — how much did fine-tuning actually improve *defect detection*?
 
-| recall | precision | fp_rate (clean) | halluc |
+This is the only table in this repo that answers that question. Both models scored in the **same run**, same matcher, same labels (632 records, 281 labeled):
+
+| | base | **SFT v4** | change |
 |---|---|---|---|
-| ~0.09 | ~0.08 | **0.77** | 0.036 |
+| **`defect_recall`** — caught a defect a human reviewer flagged | 0.072 | **0.090** | **+25% relative** (+1.8 pp) |
+| **`precision`** — of the defects it claims, share that are real | 0.032 | **0.074** | **+131% relative (2.3×)** |
+| `fp_rate` (clean) — flags something on a clean diff | 0.689 | 0.755 | **worse** (+6.6 pp) |
+| `halluc` — ungrounded backticked identifiers | 0.062 | 0.036 | −42% |
 
-The standout number is **fp_rate ≈ 0.77**: v4 asserts a defect on roughly three-quarters of genuinely clean diffs. Recall ≈ 0.09 reflects the hard ceiling of a 7B reviewing diff-only context on unseen repos — most human-flagged defects need codebase context the diff doesn't contain.
+A second, independent scoring pass put the recall gain higher (0.064 → 0.093, **+45%**); the matcher's run-to-run noise is the reason for the range. **State the detection gain as ~+25–45% relative on recall and ~2–3× on precision** — never as a single decimal.
+
+Three things must travel with those numbers:
+
+1. **The absolute level is low.** 0.09 recall means v4 catches roughly one in eleven human-flagged defects. The gain is real and it is on a small base.
+2. **Precision is the bigger and more meaningful win.** Fine-tuning roughly doubled-to-tripled the chance that a claim v4 makes corresponds to a real reviewed defect — that's what makes the reviews usable, more than the recall delta.
+3. **The "Issue detection 96.5% → 92.0%" row in §1 is not a detection metric** and must not be read as one. `compute_issue_detection` returns the fraction of reviews that mention *any identifier appearing in the diff* — a groundedness/on-topic proxy. Base scores higher on it because it writes 2,321-char reviews that name everything; v4's are 246 chars. It went down because the model got terser, not because it got worse at finding bugs.
+
+Recall ≈ 0.09 is **not** a ceiling imposed by diff-only context — the oracle experiment below measures ~4× headroom on the identical prompts. It is a student-capability limit, compounded by incomplete labels.
 
 > **Measurement caveat — the matcher is non-deterministic.** The same v4 predictions scored across two runs gave recall 0.094 vs 0.099, precision 0.070 vs 0.088, fp 0.754 vs 0.772. The DeepSeek semantic matcher's run-to-run noise is as large as the v4-vs-v5 gaps we were chasing. This is *why* `compare_recall.py` (paired bootstrap) exists, and why single-run point comparisons are not trusted here.
 

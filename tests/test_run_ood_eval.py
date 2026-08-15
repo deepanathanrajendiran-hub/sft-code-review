@@ -3,6 +3,8 @@
 Only `_extract_review` is tested here — `_generate` requires vLLM/GPU
 and is exercised by the Colab smoke run (Task 8).
 """
+from pathlib import Path
+
 import pytest
 
 from run_ood_eval import _extract_review
@@ -62,6 +64,6 @@ def test_skip_base_flag_in_argparser():
     import subprocess, sys
     result = subprocess.run(
         [sys.executable, "run_ood_eval.py", "--help"],
-        capture_output=True, text=True, cwd="/Users/deeps/Documents/SFT"
+        capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent)
     )
     assert "--skip-base" in result.stdout, f"--skip-base missing from help; got:\n{result.stdout}"

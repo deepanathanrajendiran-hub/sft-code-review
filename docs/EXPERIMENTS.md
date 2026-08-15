@@ -1,13 +1,13 @@
 # Experiments & Methodology
 
-This is the full technical log: the data pipeline, the evaluation harness (the reusable part), and the RL experiments that produced a negative result. For the metrics tables see [`RESULTS.md`](RESULTS.md).
+This is the full technical log: the data pipeline, the evaluation harness (the reusable part), and the RL experiments — three rounds invalidated by pipeline defects, then one clean run that produced a significant gain on one axis and parity on the other. For the metrics tables see [`RESULTS.md`](RESULTS.md).
 
 ## Contents
 - [Data pipeline: two-call reconciliation](#data-pipeline-two-call-reconciliation)
 - [Training (v4)](#training-v4)
 - [Evaluation methodology](#evaluation-methodology)
-- [The RL saga (negative result)](#the-rl-saga-negative-result)
-- [Why RL couldn't win here](#why-rl-couldnt-win-here)
+- [The RL saga: three invalidated rounds, then one clean run](#the-rl-saga-three-invalidated-rounds-then-one-clean-run)
+- [Why RL moved restraint but not recall](#why-rl-moved-restraint-but-not-recall)
 - [v4.1: the data fix](#v41-the-data-fix)
 - [Lessons](#lessons)
 - [Replicating the RL experiments](#replicating-the-rl-experiments)
@@ -39,7 +39,7 @@ Reconciliation-label distribution on the final 11,309 traces: AGREE 5.3%, REFERE
 3. **F3** — length sanity: `<think>` ≤ 10k chars; `<review>` within 0.5×–2.5× the reference length.
 4. **F4** — schema: both blocks present and non-empty.
 
-A ~150-entry stopword list (Python keywords, exception/typing vocab, common backticked English, well-known third-party APIs) is **shared** between the generator's F2 filter and the eval's hallucination metric, so "hallucination" means the same thing on both sides.
+A 278-term stopword list (Python keywords, exception/typing vocab, common backticked English, well-known third-party APIs) is **shared** between the generator's F2 filter and the eval's hallucination metric, so "hallucination" means the same thing on both sides.
 
 Yield: 11,309 trace records from 12,876 inputs (87.8%).
 
@@ -95,9 +95,9 @@ A two-means comparison **misses a real +0.04 recall gain ~90% of the time** at t
 
 ---
 
-## The RL saga (negative result)
+## The RL saga: three invalidated rounds, then one clean run
 
-**Motivation.** v4 ships, but recall is ~0.09 and fp-rate ~0.77 on OOD. Could RL push recall up / hallucination down? Three rounds said no.
+**Motivation.** v4 ships, but recall is ~0.09 and it flags something on ~75% of clean diffs — worse than its own base model (0.689). Could RL push recall up and flagging down? Three rounds said no; a pipeline audit then found those three rounds had measured nothing, and the one clean rerun split the difference.
 
 ### Round 1 — GRPO with a pairwise LLM judge (Runs #1–#3)
 
@@ -146,7 +146,7 @@ trainer before reaching for papers.
 ### Round 3 — v5.2: the fixed-pipeline run (one pre-registered test)
 
 v5.2 = the verifiable reward with `RECALL_BETA=1.5`, `CLEAN_CLAIM_PENALTY=0.35`, `R_MIN=0.45`,
-`kl_beta=0.02` to a true merged-v4 reference, full prompts. The run itself was the first healthy RL
+`kl_beta=0.02` to a true merged-v4 reference, full prompts. **Note on `R_MIN`:** this write-up long reported 0.45, but the executed notebook auto-selected **`R_MIN = 0.0`** from the gate's p33 (the truncation-zero point mass had collapsed the percentile). With a non-negative reward `clamp(min=0.0)` is an identity op, so the shipped run is **Dr. GRPO with a group-mean baseline**, in a CoRPO-capable trainer — the CoRPO clip never fired. The run itself was the first healthy RL
 trajectory in the project: reward 0.33 → 0.64, completion truncations 46% → 5%, KL ≤ 0.0034, no
 collapse. Mid-eval recall peaked at checkpoint-150 and declined after (continued training bought
 restraint at the cost of catches); checkpoint-150 went to the full 632-record paired bootstrap as the
@@ -165,7 +165,7 @@ single confirmatory test:
 
 ---
 
-## Why RL couldn't win here
+## Why RL moved restraint but not recall
 
 *(Revised after v5.2: the analysis below was originally written from the invalidated v5.0/v5.1 runs.
 The fixed-pipeline v5.2 run supports a sharper version of the same conclusion — RL moved the model to
@@ -175,7 +175,7 @@ real defects that score zero because the reference thread discussed something el
 
 v4 sits near its own **precision/recall frontier**. RL with a recall/precision-traded reward slides the model *along* that frontier — v5.0 toward quiet (recall ↓, halluc ↓), v5.1 toward loud (halluc ↑, recall flat) — but never pushes the frontier *outward*. To beat v4 on **both** axes you need a frontier shift, i.e. more capability, which RL on a frozen 7B with diff-only context doesn't provide. This matches the literature on small-model RL: it **restores latent capability but rarely exceeds the SFT teacher** [4], and RLVR's reasoning gains are bounded by the base model at large pass@k [5] — RL redistributes rather than expands capability. (High SFT scores are also a poor predictor of RL outcomes [6].)
 
-The bug-finding ceiling is intrinsic: recall ≈ 0.09 for *every* model (base, v4, all v5) because most human-flagged defects need codebase context the diff doesn't contain. A 7B reading a diff can't recover them no matter how it's rewarded.
+**Superseded by the oracle experiment.** An earlier revision of this section called recall ≈ 0.09 an intrinsic ceiling of diff-only context. `oracle_ceiling.py` refutes that: a frontier teacher on the *same* 632 diffs, same prompt, same 12000-char budget, same matcher and labels scores **0.388**. The plateau is the student's capability plus incomplete labels — not the task. What survives is narrower and better supported: a recall/precision-traded reward slides the model along its own assertiveness curve, and v5.2 moved it strictly inward on the false-positive axis at recall parity. See [RESULTS.md](RESULTS.md) for the full oracle table.
 
 ---
 
@@ -198,8 +198,8 @@ The over-flagging is not an RL artifact — it's baked into the SFT data. Classi
 1. **Pick the eval before the method.** A judge-independent, paired metric exposed that the apparent v5 "wins" were noise; a single-run two-means comparison would have shipped a non-improvement.
 2. **Metrics have blind spots — read the outputs.** The backtick hallucination metric missed semantic over-flagging entirely. The disagreement read (humans/agents reading actual diffs vs ground truth) caught what the aggregate hid.
 3. **The teacher's noise can exceed the signal.** The DeepSeek matcher's run-to-run variance (recall ±0.005, precision ±0.018) was comparable to the effect sizes — pairing and bootstrapping were not optional.
-4. **RL redistributes, data teaches.** On a capability-capped small model near its frontier, RL trades precision for recall; it can't teach a behavior the SFT data never showed (restraint on clean diffs). That's a data problem.
-5. **Negative results are results.** Three RL rounds and a rigorous harness conclusively show RL ≯ SFT here — which redirects effort to the lever that has actually worked (data) instead of burning more GPU on reward tuning.
+4. **RL redistributes; data is still the bigger lever — but "RL can't teach it" was wrong.** v5.2 *did* teach restraint on clean diffs (flag rate −10pp, paired CI excluding zero) without losing recall. What RL could not do was raise detection, and the reward shows why: quality is `F₁.₅(recall, precision)`, which is identically zero when a rollout catches nothing, so on the ~90% of labeled diffs the student can't solve, the recall term contributes no within-group contrast and the live gradient sits entirely on grounding/length/restraint. Capability still has to come from data.
+5. **Negative results are results — but audit the pipeline before you trust one.** Three of the four RL rounds turned out to be measuring left-truncated prompts, and the "RL is dead" conclusion drawn from them had to be publicly retracted. The supported conclusion, from one clean run, is narrower: verifiable-reward RL buys restraint, not detection, on this setup.
 
 ---
 
@@ -216,7 +216,7 @@ python corpo_train.py --variance-gate-only \
     --defect-labels cache/defect_labels_train.jsonl --output-dir /content/corpo-out
 
 # Train (CoRPO; ~4–6h A100). Checkpoints mirror to --checkpoint-sync-dir (survives Colab disconnects).
-python corpo_train.py [same args, no --variance-gate-only] \
+python corpo_train.py [same args, no --variance-gate-only] --v4-merged <merged-v4-dir> \
     --kl-beta 0.02 --num-generations 8 --prompts-per-step 4 --checkpoint-every 75 \
     --checkpoint-sync-dir /content/drive/MyDrive/sft/corpo-out-v5
 # resume after a disconnect:  add  --resume /content/drive/MyDrive/sft/corpo-out-v5/checkpoint-<N>
