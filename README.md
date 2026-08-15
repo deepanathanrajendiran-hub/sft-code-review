@@ -177,7 +177,8 @@ Datasets and prediction dumps (`*.jsonl`) and model weights (`*.zip`, merged che
 
 ## Status & next
 
-- ✅ **v4 SFT is production** — beats base 86% pairwise, hallucination halved, 27/27 failure-pattern tests.
-- ❌ **RL (GRPO / CoRPO) dropped** — three rounds, no improvement over v4; kept as a documented negative result.
+- ✅ **v4 SFT is production** — beats base 86% pairwise in-distribution and 79% out-of-distribution, hallucination halved. Every in-distribution number is reproduced in [`eval/eval.ipynb`](eval/eval.ipynb)'s stored outputs.
+- ⚠️ **v4's known failure mode: it over-flags clean code.** It invents a bug on 3/20 hand-built clean diffs where base invents none, and flags something on ~75% of label-clean OOD diffs (base: ~69%). This is the v4.1 target. (An earlier revision of this README claimed base scored 9/27 on the failure-pattern suite — that was wrong; base scores 27/27 and the suite does not discriminate between models.)
+- ⚠️ **RL: v4 still ships, but not because RL failed.** Three rounds were invalidated by pipeline bugs (see below); the one clean run (v5.2) reached recall parity with a *statistically significant* cut in clean-diff false flagging (0.749 → 0.658, paired CI [−0.165, −0.043]). `checkpoint-150` is kept as a low-false-alarm variant — it needs an unclosed-`<think>` guard in the extractor before deployment (4/632 outputs loop).
 - 🔜 **v4.1 data rebalance** — add clean-diff / no-issue traces (target ~30% clean, up from 8%) to cut the 77% false-positive rate. Single-stage SFT, no RL. High-confidence on hallucination; recall is capability-limited.
 - 🔜 **OOD breadth** — the 86% headline is in-distribution (transformers / sklearn / pydantic / fastapi). The 632-record OOD set is judge-independent, but recall there is ~0.09 for every model, reflecting the 7B's ceiling on diff-only review.

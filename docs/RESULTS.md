@@ -18,10 +18,21 @@ All numbers are from the evaluation pipelines in this repo. Two distinct eval re
 | Hallucination rate | 14.5% | 34.5% *(3× worse)* | **7.0%** *(halved vs base)* |
 | Issue detection | 96.5% | 94.5% | 92.0% |
 | ROUGE-L vs expert reference | 0.099 | — | **0.180** |
-| Failure-pattern tests (9 patterns × 3) | 9/27 | 27/27 | **27/27** |
+| Failure-pattern tests (9 patterns × 3) | 27/27 | 27/27 | 27/27 *(non-discriminating — see below)* |
+| **No-issue probe** (20 clean diffs, invents a bug) | **0/20** | — | **3/20** *(v4 is worse)* |
 | Prompt-eng gauntlet (v4 vs few-shot CoT) | — | — | **v4 wins 82.5%** |
+| Mean review length (chars) | 2,321 | — | 246 |
+
+All in-distribution numbers above are reproduced in the stored outputs of [`eval/eval.ipynb`](../eval/eval.ipynb) (200 samples, 3-vote Haiku judge, W&B run linked in Cell 10). Judge reliability: 100% agreement between single-vote and 3-vote on 50 random pairs.
 
 **Reading it:** v4 reverses every v3 regression. v3 had pushed hallucination *up* to 34.5% and absolute quality *down* to 4.25; v4 brings hallucination to 7.0% and quality to 5.86 while winning 86% of head-to-head comparisons. The few-shot CoT prompt-engineering baseline — the obvious "do you even need fine-tuning?" challenger — wins only 13.5% against v4.
+
+**Two honest corrections to earlier versions of this table.**
+
+1. **The failure-pattern suite does not discriminate.** An earlier revision reported base at 9/27. The executed notebook shows the base model passing **100% on all nine patterns**, identical to v4 (`SFT Δ +0.0%` on every row). The suite is a regression guard, not evidence of an improvement, and it should not be quoted as one.
+2. **v4 over-flags on clean code, and it is worse than base at it.** The no-issue probe has the base model inventing a bug on 0/20 hand-built clean diffs and v4 on 3/20 (`list → tuple`, a `TYPE_CHECKING` import, a docstring edit). The notebook labels this a gate v4 fails. This is the same regression the out-of-distribution harness measures at scale (flag rate 0.755 vs base 0.689, §2) and the axis the v5.2 RL run later improved with significance (0.749 → 0.658). Three independent instruments, one failure mode.
+
+Also note v4's mean review is **246 chars against base's 2,321** — a ~90% length reduction. Because the hallucination metric counts ungrounded backticked identifiers, part of the 14.5% → 7.0% drop reflects v4 simply saying less. The no-issue probe is the counterweight: it measures *semantic* over-claiming, which the lexical metric cannot see, and on that axis v4 is worse.
 
 > The `eval/eval_results.json` checked into the repo is the **v3-era** dump (its `SFT` block shows the 34.5% hallucination; its `GRPO` block is a broken empty-extraction run). The v4 numbers above come from the patched 3-vote pipeline in `eval/eval.ipynb`.
 
